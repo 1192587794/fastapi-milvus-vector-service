@@ -26,6 +26,9 @@ venv/
 ENV/
 env/
 
+# Local Milvus Lite data
+data/
+
 # Testing & Coverage
 .pytest_cache/
 .coverage
