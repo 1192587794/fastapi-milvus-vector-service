@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient,CollectionSchema, FieldSchema, DataType
 
 from core.config import Settings
 
@@ -59,17 +59,50 @@ class MilvusManager:
             return
 
         # 这里采用“字符串主键 + 向量字段 + 动态字段”的方式，
-        # 既能让结构足够简单，又能保留 metadata 扩展空间。
+        # 定义字段
+        fields = [
+            # 主键字段：字符串类型，需要指定 max_length
+            FieldSchema(
+                name="doc_id", 
+                dtype=DataType.VARCHAR,  # 字符串类型
+                max_length=255,          # 主键最大长度，根据你的 doc_id 实际情况调整
+                is_primary=True,
+                auto_id=False
+            ),
+            # 向量字段
+            FieldSchema(
+                name="embedding", 
+                dtype=DataType.FLOAT_VECTOR, 
+                dim=self.settings.milvus_vector_dimension
+            ),
+            # 其他字段可以通过动态字段自动处理，不需要显式定义
+        ]
+        
+        # 创建 schema
+        schema = CollectionSchema(
+            fields=fields,
+            enable_dynamic_field=True,  # 启用动态字段，保留 metadata 扩展能力
+            description="Document collection with embedding"
+        )
+        
+        # 创建 collection
         self._client.create_collection(
             collection_name=collection_name,
-            dimension=self.settings.milvus_vector_dimension,
-            primary_field_name="doc_id",
-            id_type="string",
-            vector_field_name="embedding",
-            metric_type=self.settings.milvus_metric_type,
-            auto_id=False,
-            enable_dynamic_field=True,
+            schema=schema,
             consistency_level=self.settings.milvus_consistency_level,
+        )
+
+        # 创建索引（关键步骤！）
+        index_params = self._client.prepare_index_params()
+        index_params.add_index(
+            field_name="embedding",
+            metric_type=self.settings.milvus_metric_type,
+            index_type="AUTOINDEX"  # 让 Milvus 自动选择最佳索引
+        )
+        
+        self._client.create_index(
+            collection_name=collection_name,
+            index_params=index_params
         )
 
     def describe_collection(self) -> dict:
