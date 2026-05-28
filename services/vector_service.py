@@ -11,7 +11,7 @@ from schemas.document import (
     UpsertDocumentsRequest,
     UpsertDocumentsResponse,
 )
-from utils.demo_embedding import DemoTextEmbedding
+from utils.ollama_embedding import OllamaTextEmbedding
 
 
 class VectorDocumentService:
@@ -25,7 +25,11 @@ class VectorDocumentService:
     def __init__(self, settings: Settings, milvus_manager: MilvusManager) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
-        self.embedding = DemoTextEmbedding(settings.milvus_vector_dimension)
+        self.embedding = OllamaTextEmbedding(
+            model=settings.ollama_embedding_model,
+            base_url=settings.ollama_base_url,
+            dimension=settings.milvus_vector_dimension,
+        )
 
     def upsert_documents(self, request: UpsertDocumentsRequest) -> UpsertDocumentsResponse:
         """

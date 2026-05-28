@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     milvus_consistency_level: str = Field(default="Bounded", alias="MILVUS_CONSISTENCY_LEVEL")
     milvus_drop_existing_on_start: bool = Field(default=False, alias="MILVUS_DROP_EXISTING_ON_START")
 
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
+
     @property
     def resolved_milvus_uri(self) -> str:
         """
