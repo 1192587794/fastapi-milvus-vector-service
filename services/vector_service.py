@@ -12,6 +12,8 @@ from schemas.document import (
     UpsertDocumentsResponse,
 )
 from utils.ollama_embedding import OllamaTextEmbedding
+from utils.text_chunker import chunk_text
+from utils.text_cleaner import clean_text
 
 
 class VectorDocumentService:
@@ -36,29 +38,64 @@ class VectorDocumentService:
         批量写入或更新文档。
 
         处理流程：
-        1. 从请求中取出文本；
-        2. 调用 embedding 组件生成向量；
-        3. 组装成 Milvus 所需的记录列表；
-        4. 调用 upsert 实现"存在则更新，不存在则插入"。
+        1. 清除每个文档的旧 chunk；
+        2. 文本清洗 + 分片；
+        3. 批量 embedding；
+        4. 组装 payload 并 upsert。
         """
         now = datetime.now(UTC)
-        texts = [item.text for item in request.items]
+
+        # 0. 清除每个文档的旧 chunk（包括旧的直接记录和分片记录）
+        for item in request.items:
+            self._delete_chunks_for_doc(item.id)
+
+        # 1. 清洗 + 分片
+        all_chunks: list[dict] = []
+        for item in request.items:
+            cleaned = clean_text(item.text)
+            chunks = chunk_text(
+                cleaned,
+                doc_id=item.id,
+                chunk_size=self.settings.chunk_size,
+                chunk_overlap=self.settings.chunk_overlap,
+            )
+            for chunk in chunks:
+                chunk["source"] = item.source
+                chunk["tags"] = item.tags
+                chunk["metadata"] = {
+                    **item.metadata,
+                    "parent_id": item.id,
+                    "chunk_index": chunk["chunk_index"],
+                }
+            all_chunks.extend(chunks)
+
+        # 过滤掉空文本 chunk
+        all_chunks = [c for c in all_chunks if c["text"].strip()]
+
+        if not all_chunks:
+            return UpsertDocumentsResponse(
+                collection_name=self.settings.milvus_collection,
+                upserted_count=0,
+                primary_keys=[],
+            )
+
+        # 2. 批量 embedding
+        texts = [c["text"] for c in all_chunks]
         vectors = self.embedding.batch_encode(texts)
 
+        # 3. 组装 payload 并 upsert
         payload = []
-        for item, vector in zip(request.items, vectors, strict=True):
+        for chunk, vector in zip(all_chunks, vectors, strict=True):
             payload.append(
                 {
-                    "id": item.id,
+                    "id": chunk["id"],
                     "embedding": vector,
-                    "text": item.text,
-                    "source": item.source,
-                    "tags": item.tags,
-                    "metadata": item.metadata,
+                    "text": chunk["text"],
+                    "source": chunk["source"],
+                    "tags": chunk["tags"],
+                    "metadata": chunk["metadata"],
+                    "parent_id": chunk["parent_id"],
                     "updated_at": now.isoformat(),
-                    # created_at 在 upsert 场景下可能会被覆盖。
-                    # 模板里优先保持实现简单；生产环境若要严格区分首次写入时间，
-                    # 可在 upsert 前先查是否存在，再决定是否沿用原值。
                     "created_at": now.isoformat(),
                 }
             )
@@ -68,10 +105,10 @@ class VectorDocumentService:
             data=payload,
         )
 
-        primary_keys = result.get("ids", [item.id for item in request.items])
+        primary_keys = result.get("ids", [c["id"] for c in all_chunks])
         return UpsertDocumentsResponse(
             collection_name=self.settings.milvus_collection,
-            upserted_count=len(request.items),
+            upserted_count=len(all_chunks),
             primary_keys=[str(key) for key in primary_keys],
         )
 
@@ -91,7 +128,7 @@ class VectorDocumentService:
             data=[query_vector],
             limit=request.top_k,
             filter=filter_expression,
-            output_fields=["text", "source", "tags", "metadata", "created_at", "updated_at"],
+            output_fields=["text", "source", "tags", "metadata", "parent_id", "chunk_index", "created_at", "updated_at"],
         )
 
         hits: list[SearchHit] = []
@@ -122,46 +159,76 @@ class VectorDocumentService:
         """
         按主键查询单条文档。
 
-        这里使用 query 而不是 search，因为此处需求是精确定位一条记录，
-        不需要做向量相似度计算。
+        文档经过分片后，原始 doc_id 不再直接存储，而是以 chunk 形式存在。
+        这里先尝试精确匹配（兼容旧数据），再按 parent_id 查询所有 chunk 并拼接文本。
         """
+        # 先尝试精确匹配（兼容未分片的旧数据）
         result = self.milvus_manager.client.query(
             collection_name=self.settings.milvus_collection,
             filter=self._quote_equals("id", id),
-            output_fields=["id", "text", "source", "tags", "metadata", "created_at", "updated_at"],
+            output_fields=["id", "text", "source", "tags", "metadata", "parent_id", "created_at", "updated_at"],
             limit=1,
         )
 
-        if not result:
+        if result:
+            item = result[0]
+            # 如果是旧格式（没有 parent_id 或 parent_id 为空），直接返回
+            if not item.get("parent_id"):
+                return GetDocumentResponse(
+                    id=item["id"],
+                    text=item.get("text", ""),
+                    source=item.get("source"),
+                    tags=item.get("tags", []),
+                    metadata=item.get("metadata", {}),
+                    created_at=self._parse_datetime(item.get("created_at")),
+                    updated_at=self._parse_datetime(item.get("updated_at")),
+                )
+
+        # 按 parent_id 查询所有 chunk
+        chunks = self.milvus_manager.client.query(
+            collection_name=self.settings.milvus_collection,
+            filter=self._quote_equals("parent_id", id),
+            output_fields=["id", "text", "source", "tags", "metadata", "chunk_index", "created_at", "updated_at"],
+            limit=1000,
+        )
+
+        if not chunks:
             return None
 
-        item = result[0]
+        # 按 chunk_index 排序后拼接文本
+        chunks.sort(key=lambda c: c.get("metadata", {}).get("chunk_index", 0))
+        full_text = "".join(c.get("text", "") for c in chunks)
+        first = chunks[0]
         return GetDocumentResponse(
-            id=item["id"],
-            text=item.get("text", ""),
-            source=item.get("source"),
-            tags=item.get("tags", []),
-            metadata=item.get("metadata", {}),
-            created_at=self._parse_datetime(item.get("created_at")),
-            updated_at=self._parse_datetime(item.get("updated_at")),
+            id=id,
+            text=full_text,
+            source=first.get("source"),
+            tags=first.get("tags", []),
+            metadata=first.get("metadata", {}),
+            created_at=self._parse_datetime(first.get("created_at")),
+            updated_at=self._parse_datetime(first.get("updated_at")),
         )
 
     def delete_document(self, id: str) -> DeleteDocumentResponse:
         """
-        按主键删除文档。
+        按主键删除文档及其所有 chunk。
 
-        删除前先查一次，主要是为了给调用方一个更清晰的 deleted 布尔结果，
-        也便于业务侧区分"真的删掉了"和"本来就不存在"。
+        删除前先查一次，给调用方一个更清晰的 deleted 布尔结果。
         """
         existing = self.get_document(id)
         if existing is None:
             return DeleteDocumentResponse(id=id, deleted=False)
 
+        # 删除原始记录（兼容旧数据）+ 所有 chunk
+        self._delete_chunks_for_doc(id)
+        return DeleteDocumentResponse(id=id, deleted=True)
+
+    def _delete_chunks_for_doc(self, doc_id: str) -> None:
+        """删除指定文档的所有 chunk 记录。"""
         self.milvus_manager.client.delete(
             collection_name=self.settings.milvus_collection,
-            filter=self._quote_equals("id", id),
+            filter=f'{self._quote_equals("parent_id", doc_id)} or {self._quote_equals("id", doc_id)}',
         )
-        return DeleteDocumentResponse(id=id, deleted=True)
 
     @staticmethod
     def _build_filter_expression(source: str | None) -> str:

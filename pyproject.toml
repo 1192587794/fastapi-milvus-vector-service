@@ -11,6 +11,8 @@ dependencies = [
   "pydantic>=2.8.0",
   "pydantic-settings>=2.3.0",
   "ollama>=0.6.2",
+  "beautifulsoup4>=4.12.0",
+  "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]

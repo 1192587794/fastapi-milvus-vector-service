@@ -74,6 +74,13 @@ class MilvusManager:
                     dtype=DataType.FLOAT_VECTOR,
                     dim=self.settings.milvus_vector_dimension,
                 ),
+                # 分片后的父文档 ID，用于按文档批量删除 chunk
+                FieldSchema(
+                    name="parent_id",
+                    dtype=DataType.VARCHAR,
+                    max_length=255,
+                    default_value="",
+                ),
                 # 其他字段可以通过动态字段自动处理,不需要显式定义
             ]
 

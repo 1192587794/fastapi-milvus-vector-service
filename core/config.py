@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     ollama_embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
 
+    chunk_size: int = Field(default=500, alias="CHUNK_SIZE")
+    chunk_overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
+
     @property
     def resolved_milvus_uri(self) -> str:
         """
