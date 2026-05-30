@@ -1,4 +1,6 @@
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from core.config import Settings
 from db.milvus_client import MilvusManager
@@ -8,9 +10,11 @@ from schemas.document import (
     SearchDocumentsRequest,
     SearchDocumentsResponse,
     SearchHit,
+    UpsertDocumentItem,
     UpsertDocumentsRequest,
     UpsertDocumentsResponse,
 )
+from utils.file_parser import FileTextExtractor
 from utils.ollama_embedding import OllamaTextEmbedding
 from utils.text_chunker import chunk_text
 from utils.text_cleaner import clean_text
@@ -111,6 +115,42 @@ class VectorDocumentService:
             upserted_count=len(all_chunks),
             primary_keys=[str(key) for key in primary_keys],
         )
+
+    def upload_document(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        doc_id: str | None = None,
+        source: str = "upload",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> UpsertDocumentsResponse:
+        """从上传文件中提取文本，然后走标准的清洗→分片→向量化→写入流程。"""
+        extractor = FileTextExtractor()
+        text = extractor.extract(filename, content)
+
+        if doc_id is None:
+            doc_id = Path(filename).stem
+
+        merged_metadata = {
+            "original_filename": filename,
+            "file_type": Path(filename).suffix.lower(),
+            **(metadata or {}),
+        }
+
+        request = UpsertDocumentsRequest(
+            items=[
+                UpsertDocumentItem(
+                    id=doc_id,
+                    text=text,
+                    source=source,
+                    tags=tags or [],
+                    metadata=merged_metadata,
+                )
+            ]
+        )
+        return self.upsert_documents(request)
 
     def search_documents(self, request: SearchDocumentsRequest) -> SearchDocumentsResponse:
         """

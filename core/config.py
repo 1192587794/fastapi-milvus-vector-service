@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=500, alias="CHUNK_SIZE")
     chunk_overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
 
+    upload_max_file_size_mb: int = Field(default=50, alias="UPLOAD_MAX_FILE_SIZE_MB")
+    upload_allowed_extensions: list[str] = Field(
+        default=[".pdf", ".docx"], alias="UPLOAD_ALLOWED_EXTENSIONS"
+    )
+
     @property
     def resolved_milvus_uri(self) -> str:
         """
