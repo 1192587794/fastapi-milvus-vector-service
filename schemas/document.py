@@ -12,9 +12,9 @@ class UpsertDocumentItem(BaseModel):
     embedding 由服务端统一生成，避免客户端各自处理导致维度、模型版本不一致。
     """
 
-    doc_id: str = Field(..., description="业务主键，建议使用稳定且可读的 ID。")
+    id: str = Field(..., description="业务主键，建议使用稳定且可读的 ID。")
     text: str = Field(..., min_length=1, description="待写入 Milvus 的原始文本内容。")
-    source: str = Field(default="default", description="文档来源，例如 manual、faq、wiki。")
+    source: str = Field(default="default", description="文档来源，例如 运维、开发、实习学习、问题排查。")
     tags: list[str] = Field(default_factory=list, description="标签集合，便于分类和展示。")
     metadata: dict[str, Any] = Field(default_factory=dict, description="扩展业务属性。")
 
@@ -36,7 +36,7 @@ class SearchDocumentsRequest(BaseModel):
 
 
 class SearchHit(BaseModel):
-    doc_id: str
+    id: str
     score: float
     text: str
     source: str | None = None
@@ -54,7 +54,7 @@ class SearchDocumentsResponse(BaseModel):
 
 
 class GetDocumentResponse(BaseModel):
-    doc_id: str
+    id: str
     text: str
     source: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -64,5 +64,5 @@ class GetDocumentResponse(BaseModel):
 
 
 class DeleteDocumentResponse(BaseModel):
-    doc_id: str
+    id: str
     deleted: bool

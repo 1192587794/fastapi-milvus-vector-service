@@ -18,7 +18,7 @@ class OllamaTextEmbedding:
     def _embed(self, text: str) -> list[float]:
         resp = httpx.post(
             f"{self.base_url}/api/embed",
-            json={"model": self.model, "input": text},
+            json={"model": self.model, "input": text, "dimensions": self.dimension},
             timeout=30,
         )
         resp.raise_for_status()

@@ -39,7 +39,7 @@ class VectorDocumentService:
         1. 从请求中取出文本；
         2. 调用 embedding 组件生成向量；
         3. 组装成 Milvus 所需的记录列表；
-        4. 调用 upsert 实现“存在则更新，不存在则插入”。
+        4. 调用 upsert 实现"存在则更新，不存在则插入"。
         """
         now = datetime.now(UTC)
         texts = [item.text for item in request.items]
@@ -49,7 +49,7 @@ class VectorDocumentService:
         for item, vector in zip(request.items, vectors, strict=True):
             payload.append(
                 {
-                    "doc_id": item.doc_id,
+                    "id": item.id,
                     "embedding": vector,
                     "text": item.text,
                     "source": item.source,
@@ -68,7 +68,7 @@ class VectorDocumentService:
             data=payload,
         )
 
-        primary_keys = result.get("ids", [item.doc_id for item in request.items])
+        primary_keys = result.get("ids", [item.id for item in request.items])
         return UpsertDocumentsResponse(
             collection_name=self.settings.milvus_collection,
             upserted_count=len(request.items),
@@ -77,7 +77,7 @@ class VectorDocumentService:
 
     def search_documents(self, request: SearchDocumentsRequest) -> SearchDocumentsResponse:
         """
-        执行“文本转向量”后的向量检索。
+        执行"文本转向量"后的向量检索。
 
         这里同时演示了 Milvus 的两个核心能力：
         - 向量相似度搜索
@@ -100,7 +100,7 @@ class VectorDocumentService:
             entity = item.get("entity", {})
             hits.append(
                 SearchHit(
-                    doc_id=str(item.get("id", "")),
+                    id=str(item.get("id", "")),
                     score=float(item.get("distance", 0.0)),
                     text=entity.get("text", ""),
                     source=entity.get("source"),
@@ -118,7 +118,7 @@ class VectorDocumentService:
             hits=hits,
         )
 
-    def get_document(self, doc_id: str) -> GetDocumentResponse | None:
+    def get_document(self, id: str) -> GetDocumentResponse | None:
         """
         按主键查询单条文档。
 
@@ -127,8 +127,8 @@ class VectorDocumentService:
         """
         result = self.milvus_manager.client.query(
             collection_name=self.settings.milvus_collection,
-            filter=self._quote_equals("doc_id", doc_id),
-            output_fields=["doc_id", "text", "source", "tags", "metadata", "created_at", "updated_at"],
+            filter=self._quote_equals("id", id),
+            output_fields=["id", "text", "source", "tags", "metadata", "created_at", "updated_at"],
             limit=1,
         )
 
@@ -137,7 +137,7 @@ class VectorDocumentService:
 
         item = result[0]
         return GetDocumentResponse(
-            doc_id=item["doc_id"],
+            id=item["id"],
             text=item.get("text", ""),
             source=item.get("source"),
             tags=item.get("tags", []),
@@ -146,22 +146,22 @@ class VectorDocumentService:
             updated_at=self._parse_datetime(item.get("updated_at")),
         )
 
-    def delete_document(self, doc_id: str) -> DeleteDocumentResponse:
+    def delete_document(self, id: str) -> DeleteDocumentResponse:
         """
         按主键删除文档。
 
         删除前先查一次，主要是为了给调用方一个更清晰的 deleted 布尔结果，
-        也便于业务侧区分“真的删掉了”和“本来就不存在”。
+        也便于业务侧区分"真的删掉了"和"本来就不存在"。
         """
-        existing = self.get_document(doc_id)
+        existing = self.get_document(id)
         if existing is None:
-            return DeleteDocumentResponse(doc_id=doc_id, deleted=False)
+            return DeleteDocumentResponse(id=id, deleted=False)
 
         self.milvus_manager.client.delete(
             collection_name=self.settings.milvus_collection,
-            filter=self._quote_equals("doc_id", doc_id),
+            filter=self._quote_equals("id", id),
         )
-        return DeleteDocumentResponse(doc_id=doc_id, deleted=True)
+        return DeleteDocumentResponse(id=id, deleted=True)
 
     @staticmethod
     def _build_filter_expression(source: str | None) -> str:

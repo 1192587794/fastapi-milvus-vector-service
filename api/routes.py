@@ -40,25 +40,25 @@ def search_documents(
     return service.search_documents(request)
 
 
-@router.get("/{doc_id}", response_model=GetDocumentResponse)
+@router.get("/{id}", response_model=GetDocumentResponse)
 def get_document(
-    doc_id: str,
+    id: str,
     service: VectorDocumentService = Depends(get_vector_service),
 ) -> GetDocumentResponse:
     """按文档主键查询单条记录。"""
-    document = service.get_document(doc_id)
+    document = service.get_document(id)
     if document is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"document not found: {doc_id}",
+            detail=f"document not found: {id}",
         )
     return document
 
 
-@router.delete("/{doc_id}", response_model=DeleteDocumentResponse)
+@router.delete("/{id}", response_model=DeleteDocumentResponse)
 def delete_document(
-    doc_id: str,
+    id: str,
     service: VectorDocumentService = Depends(get_vector_service),
 ) -> DeleteDocumentResponse:
     """按文档主键删除记录。"""
-    return service.delete_document(doc_id)
+    return service.delete_document(id)

@@ -62,7 +62,7 @@ class MilvusManager:
             fields = [
                 # 主键字段:字符串类型,需要指定 max_length
                 FieldSchema(
-                    name="doc_id",
+                    name="id",
                     dtype=DataType.VARCHAR,
                     max_length=255,
                     is_primary=True,
