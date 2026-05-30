@@ -50,6 +50,15 @@ class Settings(BaseSettings):
         default=[".pdf", ".docx"], alias="UPLOAD_ALLOWED_EXTENSIONS"
     )
 
+    # --- LLM / RAG 配置 ---
+    llm_provider: str = Field(default="ollama", alias="LLM_PROVIDER")  # ollama 或 openai
+    ollama_chat_model: str = Field(default="qwen2.5:7b", alias="OLLAMA_CHAT_MODEL")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_chat_model: str = Field(default="gpt-4o-mini", alias="OPENAI_CHAT_MODEL")
+    rag_top_k: int = Field(default=5, alias="RAG_TOP_K")
+    rag_recall_multiplier: int = Field(default=4, alias="RAG_RECALL_MULTIPLIER")
+
     @property
     def resolved_milvus_uri(self) -> str:
         """

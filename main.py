@@ -2,10 +2,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from api.qa_routes import router as qa_router
 from api.routes import router as document_router
 from core.config import get_settings
 from db.milvus_client import MilvusManager
+from services.rag_service import RAGService
 from services.vector_service import VectorDocumentService
+from utils.llm_factory import create_llm_client
 
 settings = get_settings()
 
@@ -24,7 +27,14 @@ async def lifespan(app: FastAPI):
     milvus_manager.ensure_collection()
     app.state.settings = settings
     app.state.milvus_manager = milvus_manager
-    app.state.vector_service = VectorDocumentService(settings, milvus_manager)
+    vector_service = VectorDocumentService(settings, milvus_manager)
+    app.state.vector_service = vector_service
+
+    llm_client = create_llm_client(settings)
+    app.state.rag_service = RAGService(
+        settings, milvus_manager, vector_service.embedding, llm_client
+    )
+
     yield
 
 
@@ -36,6 +46,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(document_router)
+app.include_router(qa_router)
 
 
 @app.get("/health")
