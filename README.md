@@ -1,115 +1,107 @@
-# Milvus FastAPI
+# FastAPI Milvus Vector Service
 
-这是一个整理后的、扁平化目录结构的 `FastAPI + Milvus` 项目。
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
+[![Milvus](https://img.shields.io/badge/Milvus-2.4+-orange.svg)](https://milvus.io/)
 
-目标很明确：
+基于 FastAPI + Milvus 的生产级 RAG 问答服务，支持文档管理、语义检索和多轮对话。
 
-- 所有核心代码直接放在项目根目录下，不再增加一层无意义的 `app/` 嵌套。
-- 默认支持本地 `Milvus Lite`，开箱即跑。
-- 同时保留连接远程 `Milvus / Zilliz Cloud` 的能力。
-- 代码和文档都尽量详细注释，适合学习和继续扩展。
+## 功能特性
 
-## 1. 项目结构
+### 文档管理
+- 📄 **批量写入** — 支持批量插入/更新文档，自动生成向量嵌入
+- 📁 **文件上传** — 支持 PDF、DOCX 文件上传，自动提取文本并分片向量化
+- 🔍 **语义搜索** — 基于余弦相似度的向量检索
+- 🗑️ **CRUD 操作** — 完整的文档增删改查接口
 
-```text
-milvus_fastapi/
-├── .env.example
-├── .gitignore
-├── README.md
-├── main.py
-├── pyproject.toml
-├── api/
-│   └── routes.py
-├── core/
-│   └── config.py
-├── db/
-│   └── milvus_client.py
-├── docs/
-│   ├── framework_tutorial.md
-│   └── implementation_notes.md
-├── schemas/
-│   └── document.py
-├── services/
-│   └── vector_service.py
-├── tests/
-│   └── test_demo_embedding.py
-└── utils/
-    └── demo_embedding.py
-```
+### RAG 问答
+- 💬 **非流式问答** — 一次性返回完整回答
+- 🌊 **流式问答** — SSE 实时逐块返回，前端体验更好
+- 🔄 **多轮对话** — 基于 Redis 的会话管理，支持上下文连续对话
 
-这套结构已经比较适合真实项目：
+### 检索增强
+- 🎯 **混合召回** — 向量召回 + BM25 关键词召回，双路互补
+- 📊 **RRF 粗排** — Reciprocal Rank Fusion 融合两路召回结果
+- 🎖️ **Cross-Encoder 精排** — 使用预训练模型逐对打分，提升精度
 
-- `main.py`：应用入口与生命周期管理。
-- `api/`：路由层，只处理 HTTP 协议。
-- `services/`：业务层，负责写入、查询、删除等业务逻辑。
-- `db/`：Milvus 客户端与集合初始化。
-- `schemas/`：请求和响应模型。
-- `core/`：配置层。
-- `utils/`：通用组件，这里放示例 embedding。
-- `docs/`：实现说明和框架教程。
-- `tests/`：基础测试。
+### LLM 集成
+- 🦙 **Ollama** — 支持本地 Ollama 模型（qwen2.5、llama3 等）
+- 🤖 **OpenAI 兼容** — 支持 OpenAI、DeepSeek、硅基流动等 API
 
-## 2. 为什么这样改
-
-你要求：
-
-- 当前工程目录名改成 `milvus_fastapi`
-- 所有代码都直接写在这个文件夹下
-- 不要做无意义的文件夹嵌套
-- 清理多余文件
-
-所以我把原来的模板子目录结构直接提升到了根目录，避免出现“根目录下面再套一层项目目录，再套一层 app”的过度嵌套。
-
-## 3. 快速开始
+## 快速开始
 
 ```bash
-cd /Users/nn/python_workspace/milvus_fastapi
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e '.[dev]'
+# 克隆仓库
+git clone https://github.com/yourusername/fastapi-milvus-vector-service.git
+cd fastapi-milvus-vector-service
+
+# 安装依赖（使用 uv）
+uv sync
+
+# 配置环境
 cp .env.example .env
+
+# 启动开发服务器
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 启动后访问：
-
 - Swagger 文档：<http://127.0.0.1:8000/docs>
 - ReDoc 文档：<http://127.0.0.1:8000/redoc>
 
-## 4. 默认运行模式
+## 项目结构
 
-默认配置：
-
-```env
-MILVUS_URI=./data/milvus_demo.db
+```text
+├── main.py                  # 应用入口与生命周期管理
+├── api/
+│   ├── routes.py            # 文档管理路由
+│   └── qa_routes.py         # RAG 问答路由
+├── core/
+│   └── config.py            # 配置管理（pydantic-settings）
+├── db/
+│   └── milvus_client.py     # Milvus 连接与集合管理
+├── schemas/
+│   ├── document.py          # 文档相关模型
+│   └── qa.py                # 问答相关模型
+├── services/
+│   ├── vector_service.py    # 文档向量服务
+│   ├── rag_service.py       # RAG 问答服务
+│   └── session_service.py   # Redis 会话服务
+├── utils/
+│   ├── ollama_embedding.py  # Ollama 嵌入实现
+│   ├── ollama_chat.py       # Ollama 对话客户端
+│   ├── openai_chat.py       # OpenAI 兼容对话客户端
+│   ├── bm25_retriever.py    # BM25 关键词检索
+│   ├── reranker.py          # Cross-Encoder 精排
+│   ├── text_chunker.py      # 文本分片
+│   ├── text_cleaner.py      # 文本清洗
+│   └── file_parser.py       # PDF/DOCX 文件解析
+└── tests/
 ```
 
-这表示项目默认使用本地 `Milvus Lite`。
+## API 接口
 
-优点是：
+### 文档管理
 
-- 不需要先手动启动独立 Milvus 服务。
-- 拿到项目后本地就能直接跑通。
-- 适合学习、调试和接口联调。
+| 方法 | 接口 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查（含集合信息） |
+| POST | `/api/v1/documents/upsert` | 批量插入/更新文档 |
+| POST | `/api/v1/documents/upload` | 上传 PDF/DOCX 文件 |
+| POST | `/api/v1/documents/search` | 语义搜索 |
+| GET | `/api/v1/documents/{id}` | 根据 ID 获取文档 |
+| DELETE | `/api/v1/documents/{id}` | 根据 ID 删除文档 |
 
-如果你要切换到远程 Milvus 或 Zilliz Cloud，可以把 `.env` 改成：
+### RAG 问答
 
-```env
-MILVUS_URI=http://localhost:19530
-MILVUS_TOKEN=root:Milvus
-MILVUS_DB_NAME=default
-```
+| 方法 | 接口 | 说明 |
+|------|------|------|
+| POST | `/api/v1/qa/ask` | 非流式问答 |
+| POST | `/api/v1/qa/ask/stream` | 流式问答（SSE） |
 
-## 5. API 示例
+## 使用示例
 
-### 5.1 健康检查
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-### 5.2 批量写入文档
+### 插入文档
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/documents/upsert \
@@ -117,55 +109,160 @@ curl -X POST http://127.0.0.1:8000/api/v1/documents/upsert \
   -d '{
     "items": [
       {
-        "doc_id": "doc-001",
+        "id": "doc-001",
         "text": "Milvus 是一个面向 AI 场景的向量数据库。",
         "source": "manual",
-        "tags": ["milvus", "vector-db"],
-        "metadata": {"lang": "zh", "category": "database"}
+        "tags": ["milvus", "vector-db"]
       }
     ]
   }'
 ```
 
-### 5.3 向量搜索
+### 上传文件
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/documents/upload \
+  -F "file=@document.pdf" \
+  -F "source=upload" \
+  -F "tags=pdf,文档"
+```
+
+### 语义搜索
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/documents/search \
   -H 'Content-Type: application/json' \
   -d '{
-    "query_text": "适合做向量检索接口的 Python 框架",
-    "top_k": 3,
-    "source": "manual"
+    "query_text": "向量数据库是什么",
+    "top_k": 5
   }'
 ```
 
-### 5.4 获取单条文档
+### RAG 问答
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/documents/doc-001
+# 非流式
+curl -X POST http://127.0.0.1:8000/api/v1/qa/ask \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Milvus 有什么优势？",
+    "top_k": 5
+  }'
+
+# 流式
+curl -X POST http://127.0.0.1:8000/api/v1/qa/ask/stream \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Milvus 有什么优势？",
+    "top_k": 5
+  }'
 ```
 
-### 5.5 删除文档
+### 多轮对话
 
 ```bash
-curl -X DELETE http://127.0.0.1:8000/api/v1/documents/doc-001
+# 第一轮：获取 session_id
+curl -X POST http://127.0.0.1:8000/api/v1/qa/ask \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "什么是向量数据库？"
+  }'
+
+# 第二轮：传入 session_id 继续对话
+curl -X POST http://127.0.0.1:8000/api/v1/qa/ask \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "它有哪些应用场景？",
+    "session_id": "返回的session_id"
+  }'
 ```
 
-## 6. 文档说明
+## 配置说明
 
-项目里有两份重点文档：
+通过 `.env` 文件配置：
 
-- `docs/implementation_notes.md`
-  说明这个项目为什么这么设计。
-- `docs/framework_tutorial.md`
-  讲 FastAPI、项目分层、请求流程、Milvus 接入方式，适合你理解整个框架。
+```env
+# 应用配置
+APP_NAME=Milvus FastAPI
+APP_ENV=dev
 
-## 7. 后续扩展方向
+# Milvus 配置
+# 本地 Milvus Lite（默认，无需独立服务）
+MILVUS_URI=./data/milvus_demo.db
+# 或远程 Milvus/Zilliz Cloud
+# MILVUS_URI=http://localhost:19530
+# MILVUS_TOKEN=root:Milvus
 
-如果你后面还想继续升级，我建议优先做这些：
+# Embedding 配置
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 
-- 接入真实 embedding 模型
-- 增加 Docker Compose
-- 增加多租户过滤字段
-- 增加日志和鉴权
-- 扩展成 RAG 检索服务
+# 文本分片
+CHUNK_SIZE=500
+CHUNK_OVERLAP=50
+
+# LLM 配置
+LLM_PROVIDER=ollama  # 或 openai
+OLLAMA_CHAT_MODEL=qwen2.5:7b
+# OPENAI_API_KEY=sk-xxx
+# OPENAI_BASE_URL=https://api.openai.com/v1
+
+# 混合召回（可选）
+ENABLE_HYBRID_RECALL=false
+HYBRID_RECALL_ALPHA=0.5
+
+# Cross-Encoder 精排（可选）
+ENABLE_RERANKER=false
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# Redis 会话存储（可选）
+REDIS_URL=redis://localhost:6379/0
+SESSION_TTL_SECONDS=3600
+```
+
+## RAG 流水线
+
+```text
+用户问题
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  1. 召回（Recall）                        │
+│  ├─ 稠密向量召回：语义匹配                  │
+│  └─ 稀疏 BM25 召回：关键词匹配（可选）       │
+└─────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  2. 粗排（Coarse Ranking）                │
+│  └─ RRF 融合两路召回结果                    │
+└─────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  3. 精排（Fine Ranking）—— 可选            │
+│  └─ Cross-Encoder 逐对打分                 │
+└─────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  4. 生成（Generation）                    │
+│  └─ 将召回文档作为上下文，调用 LLM 生成回答   │
+└─────────────────────────────────────────┘
+    │
+    ▼
+  回答（含引用标注 [1][2][3]）
+```
+
+## 技术栈
+
+- **FastAPI** — 现代异步 Python Web 框架
+- **Milvus** — 开源向量数据库，专为 AI 设计
+- **Pydantic** — 数据验证与配置管理
+- **Ollama** — 本地 LLM/嵌入模型服务
+- **sentence-transformers** — Cross-Encoder 精排
+- **Redis** — 多轮对话会话存储
+- **jieba** — 中文分词（BM25 检索）
+- **PyMuPDF** — PDF 文件解析
+- **python-docx** — DOCX 文件解析
+
