@@ -20,12 +20,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # --- 基础应用配置 ---
     app_name: str = Field(default="Milvus FastAPI", alias="APP_NAME")
     app_env: str = Field(default="dev", alias="APP_ENV")
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     app_debug: bool = Field(default=True, alias="APP_DEBUG")
 
+    # --- Milvus 数据库配置 ---
     # 这里同时支持两种连接方式：
     # 1. 文件路径：走 Milvus Lite，适合本地开发和快速演示。
     # 2. HTTP 地址：连接远程 Milvus / Zilliz Cloud，适合真实部署。
@@ -39,25 +41,46 @@ class Settings(BaseSettings):
     milvus_consistency_level: str = Field(default="Bounded", alias="MILVUS_CONSISTENCY_LEVEL")
     milvus_drop_existing_on_start: bool = Field(default=False, alias="MILVUS_DROP_EXISTING_ON_START")
 
+    # --- Embedding 模型配置 ---
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
     ollama_embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
 
+    # --- 文本分片配置 ---
     chunk_size: int = Field(default=500, alias="CHUNK_SIZE")
     chunk_overlap: int = Field(default=50, alias="CHUNK_OVERLAP")
 
+    # --- 文件上传配置 ---
     upload_max_file_size_mb: int = Field(default=50, alias="UPLOAD_MAX_FILE_SIZE_MB")
     upload_allowed_extensions: list[str] = Field(
         default=[".pdf", ".docx"], alias="UPLOAD_ALLOWED_EXTENSIONS"
     )
 
     # --- LLM / RAG 配置 ---
-    llm_provider: str = Field(default="ollama", alias="LLM_PROVIDER")  # ollama 或 openai
+    # llm_provider 决定使用哪个 LLM 后端：
+    #   "ollama" -> 使用本地 Ollama 服务，需要配置 OLLAMA_CHAT_MODEL
+    #   "openai" -> 使用 OpenAI 兼容 API（支持 DeepSeek、硅基流动等），需要配置 OPENAI_API_KEY
+    llm_provider: str = Field(default="ollama", alias="LLM_PROVIDER")
     ollama_chat_model: str = Field(default="qwen2.5:7b", alias="OLLAMA_CHAT_MODEL")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_chat_model: str = Field(default="gpt-4o-mini", alias="OPENAI_CHAT_MODEL")
+
+    # rag_top_k: 最终送入 LLM 的上下文文档数量
     rag_top_k: int = Field(default=5, alias="RAG_TOP_K")
+    # rag_recall_multiplier: 召回时的倍数，实际召回 top_k * multiplier 条候选
+    # 例如 top_k=5, multiplier=4 -> 召回 20 条候选，经排序后取前 5 条
     rag_recall_multiplier: int = Field(default=4, alias="RAG_RECALL_MULTIPLIER")
+
+    # --- 混合召回配置 ---
+    # enable_hybrid_recall: 是否开启混合召回（向量 + BM25）
+    #   false（默认）-> 仅向量召回
+    #   true -> 向量召回 + BM25 召回 + RRF 粗排融合
+    enable_hybrid_recall: bool = Field(default=False, alias="ENABLE_HYBRID_RECALL")
+    # hybrid_recall_alpha: RRF 融合权重（0-1）
+    #   0.5（默认）-> 向量和 BM25 等权重
+    #   越大 -> 越偏向向量召回（语义匹配）
+    #   越小 -> 越偏向 BM25 召回（关键词匹配）
+    hybrid_recall_alpha: float = Field(default=0.5, alias="HYBRID_RECALL_ALPHA")
 
     @property
     def resolved_milvus_uri(self) -> str:
