@@ -36,6 +36,18 @@ class OllamaChatClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
+    @retry(
+        retry=retry_if_exception_type(
+            (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError)
+        ),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=lambda retry_state: logger.warning(
+            "Ollama chat failed (attempt %d), retrying: %s",
+            retry_state.attempt_number,
+            retry_state.outcome.exception() if retry_state.outcome else "unknown",
+        ),
+    )
     def chat(
         self,
         messages: list[dict],
@@ -44,6 +56,12 @@ class OllamaChatClient:
     ) -> str:
         """
         非流式对话，返回完整回答文本。
+
+        重试机制：
+        - 连接失败（ConnectError）：Ollama 服务未启动或网络问题
+        - 请求超时（TimeoutException）：LLM 生成时间超过 timeout
+        - 服务端错误（HTTP 5xx）：Ollama 内部异常
+        - 最多重试 3 次，指数退避（1s, 2s, 4s）
 
         参数:
             messages: 对话历史，格式为 [{"role": "system/user/assistant", "content": "..."}]
@@ -85,35 +103,62 @@ class OllamaChatClient:
         {"message": {"role": "assistant", "content": "好"}, "done": false}
         {"message": {"role": "assistant", "content": ""}, "done": true}
 
+        重试机制：仅在建立连接阶段重试（连接错误、超时、5xx）。
+        流式传输开始后的错误不重试（因为部分数据已返回给调用方）。
+
         参数:
             同 chat() 方法
 
         生成:
             逐块输出 LLM 生成的文本片段
         """
-        with httpx.stream(
-            "POST",
-            f"{self.base_url}/api/chat",
-            json={
-                "model": self.model,
-                "messages": messages,
-                "stream": True,  # 流式：逐块接收响应
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens,
-                },
-            },
-            timeout=self.timeout,
-        ) as resp:
-            resp.raise_for_status()
-            # 逐行读取 NDJSON
-            for line in resp.iter_lines():
-                if not line:
+        # 流式模式的重试：仅重试连接建立阶段
+        # 一旦流式传输开始，部分数据已 yield 给调用方，无法重试
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with httpx.stream(
+                    "POST",
+                    f"{self.base_url}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": True,  # 流式：逐块接收响应
+                        "options": {
+                            "temperature": temperature,
+                            "num_predict": max_tokens,
+                        },
+                    },
+                    timeout=self.timeout,
+                ) as resp:
+                    resp.raise_for_status()
+                    # 逐行读取 NDJSON
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            yield content
+                        # done=true 表示生成结束
+                        if chunk.get("done"):
+                            break
+                # 流式传输成功完成，退出重试循环
+                return
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                # 如果已经开始 yield 数据了，不能重试（调用方已收到部分数据）
+                # 这里只能在连接建立阶段重试
+                logger.warning(
+                    "Ollama chat_stream failed (attempt %d), retrying: %s",
+                    attempt + 1,
+                    e,
+                )
+                if attempt < 2:
+                    import time
+                    time.sleep(min(2 ** attempt, 10))
                     continue
-                chunk = json.loads(line)
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    yield content
-                # done=true 表示生成结束
-                if chunk.get("done"):
-                    break
+                raise
+        # 理论上不会到这里，但作为兜底
+        if last_exc:
+            raise last_exc

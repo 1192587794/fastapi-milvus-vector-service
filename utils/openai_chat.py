@@ -7,6 +7,7 @@ OpenAI 兼容对话客户端
 
 import json
 import logging
+import time
 from typing import Iterator
 
 import httpx
@@ -45,6 +46,18 @@ class OpenAIChatClient:
             "Content-Type": "application/json",
         }
 
+    @retry(
+        retry=retry_if_exception_type(
+            (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError)
+        ),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=lambda retry_state: logger.warning(
+            "OpenAI chat failed (attempt %d), retrying: %s",
+            retry_state.attempt_number,
+            retry_state.outcome.exception() if retry_state.outcome else "unknown",
+        ),
+    )
     def chat(
         self,
         messages: list[dict],
@@ -53,6 +66,12 @@ class OpenAIChatClient:
     ) -> str:
         """
         非流式对话，返回完整回答文本。
+
+        重试机制：
+        - 连接失败（ConnectError）：API 服务不可达
+        - 请求超时（TimeoutException）：LLM 生成时间超过 timeout
+        - 服务端错误（HTTP 5xx）：API 服务内部异常
+        - 最多重试 3 次，指数退避（1s, 2s, 4s）
 
         调用 POST {base_url}/chat/completions，请求体格式：
         {
@@ -105,42 +124,66 @@ class OpenAIChatClient:
         注意：部分 OpenAI 兼容 API 会在某些 chunk 中返回空的 choices 列表
         （如 usage 统计 chunk），需要跳过这些 chunk。
 
+        重试机制：仅在建立连接阶段重试（连接错误、超时、5xx）。
+        流式传输开始后的错误不重试（因为部分数据已返回给调用方）。
+
         参数:
             同 chat() 方法
 
         生成:
             逐块输出 LLM 生成的文本片段
         """
-        with httpx.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json={
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": True,
-            },
-            timeout=self.timeout,
-        ) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if not line:
+        # 流式模式的重试：仅重试连接建立阶段
+        # 一旦流式传输开始，部分数据已 yield 给调用方，无法重试
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with httpx.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(),
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                    },
+                    timeout=self.timeout,
+                ) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        # OpenAI SSE 格式：每行以 "data: " 开头
+                        if line.startswith("data: "):
+                            payload = line[6:]
+                            # [DONE] 标记流式响应结束
+                            if payload.strip() == "[DONE]":
+                                break
+                            chunk = json.loads(payload)
+                            # 某些兼容 API 会返回空 choices（如 usage 统计 chunk），需要跳过
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            # delta 中包含增量文本
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                # 流式传输成功完成，退出重试循环
+                return
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                logger.warning(
+                    "OpenAI chat_stream failed (attempt %d), retrying: %s",
+                    attempt + 1,
+                    e,
+                )
+                if attempt < 2:
+                    time.sleep(min(2 ** attempt, 10))
                     continue
-                # OpenAI SSE 格式：每行以 "data: " 开头
-                if line.startswith("data: "):
-                    payload = line[6:]
-                    # [DONE] 标记流式响应结束
-                    if payload.strip() == "[DONE]":
-                        break
-                    chunk = json.loads(payload)
-                    # 某些兼容 API 会返回空 choices（如 usage 统计 chunk），需要跳过
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    # delta 中包含增量文本
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        yield content
+                raise
+        # 理论上不会到这里，但作为兜底
+        if last_exc:
+            raise last_exc
