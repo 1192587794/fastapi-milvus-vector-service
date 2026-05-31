@@ -93,6 +93,21 @@ class Settings(BaseSettings):
         default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
     )
 
+    # --- 多轮对话配置 ---
+    # rag_max_history_turns: 最多保留多少轮对话历史
+    #   10（默认）-> 保留最近 10 轮（user + assistant 各 10 条）
+    #   设为 0 则禁用对话历史，每次都像全新对话
+    #   过长的历史会占用 LLM 的上下文窗口，影响参考资料的可用空间
+    rag_max_history_turns: int = Field(default=10, alias="RAG_MAX_HISTORY_TURNS")
+
+    # --- Redis 会话存储配置 ---
+    # redis_url: Redis 连接地址，用于存储多轮对话历史
+    #   默认连接本地 Redis 的 0 号数据库
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    # session_ttl_seconds: 会话过期时间（秒），过期后自动清理
+    #   3600（默认）-> 1 小时无活动后过期
+    session_ttl_seconds: int = Field(default=3600, alias="SESSION_TTL_SECONDS")
+
     @property
     def resolved_milvus_uri(self) -> str:
         """

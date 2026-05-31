@@ -8,8 +8,10 @@ FastAPI 应用入口。
 4. 定义健康检查端点
 """
 
+import logging
 from contextlib import asynccontextmanager
 
+import redis
 from fastapi import FastAPI
 
 from api.qa_routes import router as qa_router
@@ -17,6 +19,7 @@ from api.routes import router as document_router
 from core.config import get_settings
 from db.milvus_client import MilvusManager
 from services.rag_service import RAGService
+from services.session_service import SessionService
 from services.vector_service import VectorDocumentService
 from utils.bm25_retriever import BM25Retriever
 from utils.llm_factory import create_llm_client
@@ -69,10 +72,24 @@ async def lifespan(app: FastAPI):
         else None
     )
 
-    # 第六步：RAG 服务，编排召回 + 粗排 + 精排 + 生成
+    # 第六步：Redis 会话服务（可选）
+    # 用于存储多轮对话历史，客户端只需传 session_id 即可续接对话
+    session_service = None
+    try:
+        redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+        redis_client.ping()  # 测试 Redis 连接
+        session_service = SessionService(redis_client, settings.session_ttl_seconds)
+        logging.getLogger(__name__).info("Redis 会话服务已连接: %s", settings.redis_url)
+    except redis.RedisError as e:
+        logging.getLogger(__name__).warning(
+            "Redis 连接失败，多轮对话服务端存储不可用: %s。客户端仍可通过 history 字段传入历史。",
+            e,
+        )
+
+    # 第七步：RAG 服务，编排召回 + 粗排 + 精排 + 生成
     app.state.rag_service = RAGService(
         settings, milvus_manager, vector_service.embedding, llm_client,
-        bm25_retriever, reranker,
+        bm25_retriever, reranker, session_service,
     )
 
     yield

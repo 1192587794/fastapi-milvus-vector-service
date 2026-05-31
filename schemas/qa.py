@@ -14,6 +14,11 @@ class AskRequest(BaseModel):
     RAG 问答请求模型。
 
     对应 POST /api/v1/qa/ask 和 POST /api/v1/qa/ask/stream 的请求体。
+
+    多轮对话用法：
+    - 首次提问不传 session_id，服务端创建新会话并在响应中返回 session_id
+    - 后续追问传入 session_id，服务端自动从 Redis 加载历史
+    - 客户端只需记住 session_id，无需管理历史
     """
 
     question: str = Field(..., min_length=1, description="用户提出的问题。")
@@ -21,6 +26,10 @@ class AskRequest(BaseModel):
     source: str | None = Field(default=None, description="按文档来源过滤，如 'upload'、'default'。")
     temperature: float = Field(default=0.7, ge=0, le=2, description="LLM 生成温度，越高越随机。")
     max_tokens: int = Field(default=1024, ge=1, le=8192, description="LLM 最大生成 token 数。")
+    session_id: str | None = Field(
+        default=None,
+        description="会话 ID。首次提问不传，后续追问传入上次返回的 session_id。",
+    )
 
 
 class SourceChunk(BaseModel):
@@ -53,3 +62,7 @@ class AskResponse(BaseModel):
     llm_provider: str  # 使用的 LLM 提供商（ollama 或 openai）
     confidence: float = Field(default=0.0, description="回答置信度，0-1 之间，越高越可信。")
     hybrid_recall_used: bool = Field(default=False, description="是否使用了混合召回（向量 + BM25）。")
+    session_id: str | None = Field(
+        default=None,
+        description="会话 ID。首次提问时由服务端生成，后续追问时原样传入即可。",
+    )

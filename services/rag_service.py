@@ -17,6 +17,7 @@ from typing import Any
 from core.config import Settings
 from db.milvus_client import MilvusManager
 from schemas.qa import AskRequest, AskResponse, SourceChunk
+from services.session_service import SessionService
 from utils.bm25_retriever import BM25Retriever
 from utils.ollama_chat import OllamaChatClient
 from utils.openai_chat import OpenAIChatClient
@@ -56,6 +57,7 @@ class RAGService:
         llm_client: OllamaChatClient | OpenAIChatClient,  # LLM 对话客户端
         bm25_retriever: BM25Retriever | None = None,  # BM25 召回器，None 表示不启用混合召回
         reranker: CrossEncoderReranker | None = None,  # 精排器，None 表示不启用精排
+        session_service: SessionService | None = None,  # 会话服务，None 表示不启用服务端历史存储
     ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
@@ -63,17 +65,23 @@ class RAGService:
         self.llm_client = llm_client
         self.bm25_retriever = bm25_retriever
         self.reranker = reranker
+        self.session_service = session_service
 
     def ask(self, request: AskRequest) -> AskResponse:
         """
         非流式 RAG 问答主流程。
 
         流程：
-        1. 召回 + 粗排 -> sources（相关文档列表）
-        2. 计算置信度 -> confidence
-        3. 构造 prompt + 调用 LLM -> answer
-        4. 组装响应返回
+        1. 加载对话历史（从 Redis 或客户端传入）
+        2. 召回 + 粗排 -> sources（相关文档列表）
+        3. 计算置信度 -> confidence
+        4. 构造 prompt + 调用 LLM -> answer
+        5. 保存对话历史到 Redis（如果启用了会话服务）
+        6. 组装响应返回
         """
+        # --- 阶段 0：会话管理 ---
+        session_id, history = self._resolve_session(request)
+
         # --- 阶段 1：召回 + 粗排 ---
         sources, hybrid_used = self._recall(
             question=request.question,
@@ -85,14 +93,17 @@ class RAGService:
         confidence = self._compute_confidence(sources)
 
         # --- 阶段 3：生成 ---
-        messages = self._build_messages(request.question, sources)
+        messages = self._build_messages(request.question, sources, history)
         answer = self.llm_client.chat(
             messages=messages,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         )
 
-        # --- 阶段 4：组装响应 ---
+        # --- 阶段 4：保存对话历史 ---
+        self._save_to_session(session_id, request.question, answer)
+
+        # --- 阶段 5：组装响应 ---
         return AskResponse(
             question=request.question,
             answer=answer,
@@ -100,6 +111,7 @@ class RAGService:
             llm_provider=self.settings.llm_provider,
             confidence=confidence,
             hybrid_recall_used=hybrid_used,
+            session_id=session_id,
         )
 
     def ask_stream(self, request: AskRequest) -> Iterator[str]:
@@ -109,6 +121,9 @@ class RAGService:
         召回步骤与非流式相同，生成步骤改为流式输出。
         返回的文本片段由路由层拼装成 SSE 事件流。
         """
+        # --- 阶段 0：会话管理 ---
+        session_id, history = self._resolve_session(request)
+
         # --- 阶段 1：召回 + 粗排 ---
         sources, hybrid_used = self._recall(
             question=request.question,
@@ -117,13 +132,69 @@ class RAGService:
         )
 
         # --- 阶段 2：流式生成 ---
-        messages = self._build_messages(request.question, sources)
+        # 流式模式下，需要收集所有 chunk 才能保存完整回答
+        messages = self._build_messages(request.question, sources, history)
+        collected_answer: list[str] = []
         for chunk in self.llm_client.chat_stream(
             messages=messages,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         ):
+            collected_answer.append(chunk)
             yield chunk
+
+        # 流式生成完成后，保存完整的对话历史到 Redis
+        full_answer = "".join(collected_answer)
+        self._save_to_session(session_id, request.question, full_answer)
+
+    def _resolve_session(self, request: AskRequest) -> tuple[str | None, list[dict]]:
+        """
+        解析会话，从 Redis 加载或创建新会话。
+
+        流程：
+        1. 启用了 SessionService + 传了 session_id → 从 Redis 加载历史
+        2. 启用了 SessionService + 没传 session_id → 创建新会话
+        3. 未启用 SessionService → 无历史（降级为单轮对话）
+
+        参数:
+            request: 问答请求
+
+        返回:
+            (session_id, history_messages)
+        """
+        if not self.session_service:
+            # Redis 不可用，降级为无状态单轮对话
+            return None, []
+
+        if request.session_id:
+            # 已有会话，从 Redis 加载历史
+            history = self.session_service.get_history(request.session_id)
+            return request.session_id, history
+        else:
+            # 创建新会话
+            session_id = self.session_service.create_session()
+            return session_id, []
+
+    def _save_to_session(self, session_id: str | None, question: str, answer: str) -> None:
+        """
+        将本轮问答保存到 Redis 会话中。
+
+        只有当 session_id 存在且 SessionService 可用时才保存。
+        保存 user 消息和 assistant 回答各一条。
+
+        参数:
+            session_id: 会话 ID（可能为 None）
+            question: 用户问题
+            answer: LLM 回答
+        """
+        if not session_id or not self.session_service:
+            return
+
+        try:
+            self.session_service.append_message(session_id, "user", question)
+            self.session_service.append_message(session_id, "assistant", answer)
+        except Exception:
+            logger.warning("保存对话历史失败 session_id=%s", session_id, exc_info=True)
 
     def _recall(
         self,
@@ -350,24 +421,77 @@ class RAGService:
 
         return round(confidence, 4)
 
-    def _build_messages(self, question: str, sources: list[SourceChunk]) -> list[dict]:
+    def _truncate_history(self, history: list[dict]) -> list[dict]:
         """
-        将召回结果拼成 LLM 对话的 messages 格式。
+        截断对话历史，只保留最近 N 轮。
 
-        构造逻辑：
+        逻辑：
+        1. 按 rag_max_history_turns 配置截断，保留最近的消息
+        2. 确保截断后的历史从 user 消息开始（不能从 assistant 开始）
+           因为 LLM 对话格式要求 user/assistant 交替出现
+
+        参数:
+            history: 完整的对话历史列表
+
+        返回:
+            截断后的对话历史列表
+        """
+        if not history:
+            return []
+
+        max_turns = self.settings.rag_max_history_turns
+        if max_turns <= 0:
+            return []
+
+        # 每轮包含 user + assistant 两条消息，最多保留 max_turns * 2 条
+        max_messages = max_turns * 2
+        truncated = history[-max_messages:] if len(history) > max_messages else history
+
+        # 确保从 user 消息开始：如果截断后第一条是 assistant，就丢掉它
+        if truncated and truncated[0].get("role") == "assistant":
+            truncated = truncated[1:]
+
+        return truncated
+
+    def _build_messages(
+        self,
+        question: str,
+        sources: list[SourceChunk],
+        history: list[dict] | None = None,
+    ) -> list[dict]:
+        """
+        将对话历史和召回结果拼成 LLM 对话的 messages 格式。
+
+        拼装顺序（这是 LLM 能正确理解上下文的关键）：
         1. system prompt：定义 LLM 角色和回答规则（含引用标记要求）
-        2. user message：参考资料（带 [1][2][3] 编号）+ 用户问题
+        2. 历史对话：之前的 user/assistant 消息（让 LLM 理解上下文）
+        3. 当前问题：参考资料（带 [1][2][3] 编号）+ 用户当前问题
 
-        这样 LLM 在回答时会自然地使用 [1][2] 来标注引用来源。
+        为什么历史放在参考资料前面？
+        - LLM 的注意力机制对开头和结尾的内容更敏感
+        - system prompt 放最前面确保角色设定不被冲淡
+        - 当前问题放最后面确保 LLM 优先回答当前问题
+        - 历史对话放在中间，提供上下文背景
+
+        参数:
+            question: 用户当前问题
+            sources: 召回的参考文档列表
+            history: 对话历史（可选，默认为空）
         """
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # 插入对话历史（经过截断处理）
+        if history:
+            truncated = self._truncate_history(history)
+            messages.extend(truncated)
+
+        # 构造当前问题的参考资料
         context_parts: list[str] = []
         for i, src in enumerate(sources, 1):
             context_parts.append(f"[{i}] {src.text}")
         context = "\n\n".join(context_parts)
 
         user_message = f"参考资料：\n{context}\n\n用户问题：{question}"
+        messages.append({"role": "user", "content": user_message})
 
-        return [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
+        return messages
