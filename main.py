@@ -20,6 +20,7 @@ from services.rag_service import RAGService
 from services.vector_service import VectorDocumentService
 from utils.bm25_retriever import BM25Retriever
 from utils.llm_factory import create_llm_client
+from utils.reranker import CrossEncoderReranker
 
 # 全局配置单例，整个进程生命周期内只解析一次
 settings = get_settings()
@@ -60,9 +61,18 @@ async def lifespan(app: FastAPI):
         else None
     )
 
-    # 第五步：RAG 服务，编排召回 + 粗排 + 生成
+    # 第五步：Cross-Encoder 精排器（可选）
+    # 懒加载设计：模型在首次 rerank() 调用时才下载和加载，不阻塞启动
+    reranker = (
+        CrossEncoderReranker(settings.reranker_model)
+        if settings.enable_reranker
+        else None
+    )
+
+    # 第六步：RAG 服务，编排召回 + 粗排 + 精排 + 生成
     app.state.rag_service = RAGService(
-        settings, milvus_manager, vector_service.embedding, llm_client, bm25_retriever
+        settings, milvus_manager, vector_service.embedding, llm_client,
+        bm25_retriever, reranker,
     )
 
     yield

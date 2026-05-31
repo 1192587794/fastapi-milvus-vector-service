@@ -1,14 +1,13 @@
 """
 RAG 问答服务
 
-串联 RAG 流水线的三个核心阶段：
+串联 RAG 流水线的四个核心阶段：
 1. 召回（Recall）：从向量数据库中检索与用户问题相关的文档
    - 稠密向量召回：用 embedding 模型编码问题，做余弦相似度搜索
    - 稀疏 BM25 召回：用 BM25 算法做关键词匹配（可选）
 2. 粗排（Coarse Ranking）：用 RRF（Reciprocal Rank Fusion）融合两路召回结果
-3. 生成（Generation）：将召回的文档作为上下文，调用 LLM 生成回答
-
-精排（Fine Ranking / Reranker）暂未实现，后续可在此处插入 cross-encoder 模块。
+3. 精排（Fine Ranking）：用 Cross-Encoder 模型对候选文档逐对打分（可选）
+4. 生成（Generation）：将召回的文档作为上下文，调用 LLM 生成回答
 """
 
 import logging
@@ -21,6 +20,7 @@ from schemas.qa import AskRequest, AskResponse, SourceChunk
 from utils.bm25_retriever import BM25Retriever
 from utils.ollama_chat import OllamaChatClient
 from utils.openai_chat import OpenAIChatClient
+from utils.reranker import CrossEncoderReranker
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +55,14 @@ class RAGService:
         embedding: Any,  # OllamaTextEmbedding 实例，用于将文本编码为向量
         llm_client: OllamaChatClient | OpenAIChatClient,  # LLM 对话客户端
         bm25_retriever: BM25Retriever | None = None,  # BM25 召回器，None 表示不启用混合召回
+        reranker: CrossEncoderReranker | None = None,  # 精排器，None 表示不启用精排
     ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
         self.embedding = embedding
         self.llm_client = llm_client
         self.bm25_retriever = bm25_retriever
+        self.reranker = reranker
 
     def ask(self, request: AskRequest) -> AskResponse:
         """
@@ -172,11 +174,18 @@ class RAGService:
             )
 
             # --- RRF 粗排（Coarse Ranking）：融合两路结果 ---
-            sources = self._rrf_fusion(dense_results, sparse_results, top_k)
-            return sources, True
+            # 粗排取 recall_limit 条候选，供精排进一步筛选
+            coarse_top_k = recall_limit if self.reranker else top_k
+            sources = self._rrf_fusion(dense_results, sparse_results, coarse_top_k)
         else:
-            # 纯向量模式：直接截取 top_k
-            return dense_results[:top_k], False
+            # 纯向量模式：直接截取
+            sources = dense_results[:recall_limit if self.reranker else top_k]
+
+        # --- 精排（Fine Ranking）：Cross-Encoder 逐对打分（可选）---
+        if self.reranker:
+            sources = self.reranker.rerank(question, sources, top_k)
+
+        return sources, use_hybrid
 
     def _dense_recall(
         self,

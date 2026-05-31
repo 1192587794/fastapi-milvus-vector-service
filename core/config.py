@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     #   越小 -> 越偏向 BM25 召回（关键词匹配）
     hybrid_recall_alpha: float = Field(default=0.5, alias="HYBRID_RECALL_ALPHA")
 
+    # --- 精排配置 ---
+    # enable_reranker: 是否开启 Cross-Encoder 精排
+    #   false（默认）-> 不精排，直接用粗排结果
+    #   true -> 在粗排后用 Cross-Encoder 模型对候选文档逐对打分
+    enable_reranker: bool = Field(default=False, alias="ENABLE_RERANKER")
+    # reranker_model: Hugging Face 上的 Cross-Encoder 模型名称
+    #   首次使用时自动下载（约 80MB），后续使用本地缓存
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
+    )
+
     @property
     def resolved_milvus_uri(self) -> str:
         """
