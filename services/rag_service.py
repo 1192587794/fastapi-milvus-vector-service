@@ -5,7 +5,8 @@ RAG 问答服务
 1. 召回（Recall）：从向量数据库中检索与用户问题相关的文档
    - 稠密向量召回：用 embedding 模型编码问题，做余弦相似度搜索
    - 稀疏 BM25 召回：用 BM25 算法做关键词匹配（可选）
-2. 粗排（Coarse Ranking）：用 RRF（Reciprocal Rank Fusion）融合两路召回结果
+   - 图谱召回：从知识图谱中检索相关实体和关系（可选）
+2. 粗排（Coarse Ranking）：用 RRF（Reciprocal Rank Fusion）融合多路召回结果
 3. 精排（Fine Ranking）：用 Cross-Encoder 模型对候选文档逐对打分（可选）
 4. 生成（Generation）：将召回的文档作为上下文，调用 LLM 生成回答
 """
@@ -58,6 +59,7 @@ class RAGService:
         bm25_retriever: BM25Retriever | None = None,  # BM25 召回器，None 表示不启用混合召回
         reranker: CrossEncoderReranker | None = None,  # 精排器，None 表示不启用精排
         session_service: SessionService | None = None,  # 会话服务，None 表示不启用服务端历史存储
+        graph_retriever: Any | None = None,  # 图谱召回器，None 表示不启用图谱召回
     ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
@@ -66,6 +68,7 @@ class RAGService:
         self.bm25_retriever = bm25_retriever
         self.reranker = reranker
         self.session_service = session_service
+        self.graph_retriever = graph_retriever
 
     def ask(self, request: AskRequest) -> AskResponse:
         """
@@ -111,6 +114,7 @@ class RAGService:
             llm_provider=self.settings.llm_provider,
             confidence=confidence,
             hybrid_recall_used=hybrid_used,
+            graph_recall_used=self.graph_retriever is not None,
             session_id=session_id,
         )
 
@@ -208,6 +212,7 @@ class RAGService:
         根据配置决定走哪种召回模式：
         - 纯向量召回（默认）：只用 embedding 做语义搜索
         - 混合召回 + RRF 粗排：同时执行向量召回和 BM25 召回，用 RRF 融合
+        - 图谱召回（可选）：从知识图谱中检索相关实体和关系
 
         参数:
             question: 用户问题
@@ -230,33 +235,44 @@ class RAGService:
         # --- 向量召回（Dense Recall）：语义匹配 ---
         dense_results = self._dense_recall(question, recall_limit, filter_expr)
 
-        # --- 判断是否开启混合召回 ---
+        # --- BM25 稀疏召回（Sparse Recall，可选）---
+        sparse_results = []
         use_hybrid = (
             self.settings.enable_hybrid_recall
             and self.bm25_retriever is not None
         )
-
         if use_hybrid:
-            # --- BM25 稀疏召回（Sparse Recall）：关键词匹配 ---
             sparse_results = self.bm25_retriever.retrieve(
                 query=question,
                 top_k=recall_limit,
                 filter_expr=filter_expr,
             )
 
-            # --- RRF 粗排（Coarse Ranking）：融合两路结果 ---
-            # 粗排取 recall_limit 条候选，供精排进一步筛选
-            coarse_top_k = recall_limit if self.reranker else top_k
-            sources = self._rrf_fusion(dense_results, sparse_results, coarse_top_k)
+        # --- 图谱召回（Graph Recall，可选）---
+        graph_results = []
+        use_graph = self.graph_retriever is not None
+        if use_graph:
+            graph_results = self.graph_retriever.retrieve(
+                question=question,
+                top_k=recall_limit,
+                max_hops=self.settings.graph_max_hops,
+            )
+
+        # --- RRF 粗排（Coarse Ranking）：融合多路结果 ---
+        coarse_top_k = recall_limit if self.reranker else top_k
+        if use_hybrid or use_graph:
+            sources = self._rrf_fusion(
+                dense_results, sparse_results, graph_results, coarse_top_k
+            )
         else:
             # 纯向量模式：直接截取
-            sources = dense_results[:recall_limit if self.reranker else top_k]
+            sources = dense_results[:coarse_top_k]
 
         # --- 精排（Fine Ranking）：Cross-Encoder 逐对打分（可选）---
         if self.reranker:
             sources = self.reranker.rerank(question, sources, top_k)
 
-        return sources, use_hybrid
+        return sources, use_hybrid or use_graph
 
     def _dense_recall(
         self,
@@ -303,33 +319,49 @@ class RAGService:
         self,
         dense_results: list[SourceChunk],
         sparse_results: list[dict],
+        graph_results: list[dict],
         top_k: int,
     ) -> list[SourceChunk]:
         """
-        RRF（Reciprocal Rank Fusion）粗排算法。
+        RRF（Reciprocal Rank Fusion）粗排算法，支持 2-way 或 3-way 融合。
 
-        核心思想：不看分数的绝对值，只看排名。因为向量召回的 cosine 分数和 BM25 分数
-        量纲不同，无法直接比较。RRF 通过排名来融合，天然解决了这个问题。
+        核心思想：不看分数的绝对值，只看排名。因为向量召回的 cosine 分数、BM25 分数
+        和图谱召回分数量纲不同，无法直接比较。RRF 通过排名来融合，天然解决了这个问题。
 
-        RRF 公式：
-            score(d) = alpha / (k + rank_dense(d)) + (1 - alpha) / (k + rank_sparse(d))
+        3-way RRF 公式：
+            score(d) = w_dense / (k + rank_dense(d))
+                     + w_sparse / (k + rank_sparse(d))
+                     + w_graph / (k + rank_graph(d))
 
         其中：
-        - alpha: 融合权重，越大越偏向向量召回（默认 0.5 表示等权重）
+        - w_dense + w_sparse + w_graph = 1
         - k: 常数 60，避免排名第一的文档获得过大权重
-        - rank_dense(d): 文档 d 在向量召回中的排名（从 1 开始）
-        - rank_sparse(d): 文档 d 在 BM25 召回中的排名（从 1 开始）
-        - 如果文档 d 只出现在一路结果中，另一路排名取 max_rank + 1
+        - 未出现在某路结果中的文档，该路排名取 max_rank + 1
 
         参数:
             dense_results: 向量召回结果
             sparse_results: BM25 召回结果
+            graph_results: 图谱召回结果
             top_k: 最终返回数量
 
         返回:
             按 RRF 分数降序排列的 top_k 条结果
         """
         alpha = self.settings.hybrid_recall_alpha
+        graph_weight = self.settings.graph_recall_weight
+
+        # 计算各路权重（确保总和为 1）
+        if graph_results:
+            # 3-way 融合：dense + sparse + graph
+            remaining = 1.0 - graph_weight
+            w_dense = alpha * remaining
+            w_sparse = (1 - alpha) * remaining
+            w_graph = graph_weight
+        else:
+            # 2-way 融合：dense + sparse（保持原有行为）
+            w_dense = alpha
+            w_sparse = 1 - alpha
+            w_graph = 0.0
 
         # 建立 doc_id -> 排名 的映射（排名从 1 开始）
         dense_rank: dict[str, int] = {}
@@ -340,17 +372,19 @@ class RAGService:
         for i, doc in enumerate(sparse_results):
             sparse_rank[doc["id"]] = i + 1
 
+        graph_rank: dict[str, int] = {}
+        for i, doc in enumerate(graph_results):
+            graph_rank[doc["id"]] = i + 1
+
         # 收集所有出现在任一路结果中的文档 id
-        all_ids = set(dense_rank.keys()) | set(sparse_rank.keys())
+        all_ids = set(dense_rank.keys()) | set(sparse_rank.keys()) | set(graph_rank.keys())
 
         # 构建 doc_id -> SourceChunk 的映射
-        # 优先使用向量召回的结果（因为包含 cosine score）
         id_to_doc: dict[str, SourceChunk] = {}
         for doc in dense_results:
             id_to_doc[doc.id] = doc
         for doc in sparse_results:
             if doc["id"] not in id_to_doc:
-                # 只在 BM25 结果中出现的文档，用 bm25_score 作为初始 score
                 id_to_doc[doc["id"]] = SourceChunk(
                     id=doc["id"],
                     text=doc["text"],
@@ -358,15 +392,32 @@ class RAGService:
                     source=doc.get("source"),
                     metadata=doc.get("metadata", {}),
                 )
+        for doc in graph_results:
+            if doc["id"] not in id_to_doc:
+                id_to_doc[doc["id"]] = SourceChunk(
+                    id=doc["id"],
+                    text=doc["text"],
+                    score=doc.get("score", 0.5),
+                    source=doc.get("source", "graph"),
+                    metadata=doc.get("metadata", {}),
+                )
 
         # 对每个文档计算 RRF 分数
-        # 未出现在某路结果中的文档，该路排名取 max_rank + 1（惩罚）
-        default_rank = max(len(dense_results), len(sparse_results)) + 1
+        max_dense = len(dense_results) if dense_results else 0
+        max_sparse = len(sparse_results) if sparse_results else 0
+        max_graph = len(graph_results) if graph_results else 0
+        default_rank = max(max_dense, max_sparse, max_graph) + 1
+
         scored: list[tuple[str, float]] = []
         for doc_id in all_ids:
             d_rank = dense_rank.get(doc_id, default_rank)
             s_rank = sparse_rank.get(doc_id, default_rank)
-            rrf_score = alpha / (RRF_K + d_rank) + (1 - alpha) / (RRF_K + s_rank)
+            g_rank = graph_rank.get(doc_id, default_rank)
+            rrf_score = (
+                w_dense / (RRF_K + d_rank)
+                + w_sparse / (RRF_K + s_rank)
+                + w_graph / (RRF_K + g_rank)
+            )
             scored.append((doc_id, rrf_score))
 
         # 按 RRF 分数降序排序
@@ -465,7 +516,7 @@ class RAGService:
         拼装顺序（这是 LLM 能正确理解上下文的关键）：
         1. system prompt：定义 LLM 角色和回答规则（含引用标记要求）
         2. 历史对话：之前的 user/assistant 消息（让 LLM 理解上下文）
-        3. 当前问题：参考资料（带 [1][2][3] 编号）+ 用户当前问题
+        3. 当前问题：参考资料（带 [1][2][3] 编号）+ 图谱上下文 + 用户当前问题
 
         为什么历史放在参考资料前面？
         - LLM 的注意力机制对开头和结尾的内容更敏感
@@ -487,11 +538,25 @@ class RAGService:
 
         # 构造当前问题的参考资料
         context_parts: list[str] = []
+        graph_context_parts: list[str] = []
+
         for i, src in enumerate(sources, 1):
+            # 检查是否包含图谱上下文
+            graph_ctx = src.metadata.get("graph_context", "")
+            if graph_ctx:
+                graph_context_parts.append(graph_ctx)
             context_parts.append(f"[{i}] {src.text}")
+
         context = "\n\n".join(context_parts)
 
-        user_message = f"参考资料：\n{context}\n\n用户问题：{question}"
+        # 如果有图谱上下文，添加到参考资料中
+        if graph_context_parts:
+            unique_graph_ctx = list(set(graph_context_parts))
+            graph_text = "\n".join(unique_graph_ctx)
+            user_message = f"参考资料：\n{context}\n\n{graph_text}\n\n用户问题：{question}"
+        else:
+            user_message = f"参考资料：\n{context}\n\n用户问题：{question}"
+
         messages.append({"role": "user", "content": user_message})
 
         return messages

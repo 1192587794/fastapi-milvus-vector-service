@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from utils.ollama_embedding import OllamaTextEmbedding
 from utils.text_chunker import chunk_text
 from utils.text_cleaner import clean_text
 
+logger = logging.getLogger(__name__)
+
 
 class VectorDocumentService:
     """
@@ -28,9 +31,15 @@ class VectorDocumentService:
     同时也负责把 Milvus 的返回结果重新整理成稳定的业务响应模型。
     """
 
-    def __init__(self, settings: Settings, milvus_manager: MilvusManager) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        milvus_manager: MilvusManager,
+        graph_service: Any | None = None,
+    ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
+        self.graph_service = graph_service
         self.embedding = OllamaTextEmbedding(
             model=settings.ollama_embedding_model,
             base_url=settings.ollama_base_url,
@@ -110,6 +119,17 @@ class VectorDocumentService:
         )
 
         primary_keys = result.get("ids", [c["id"] for c in all_chunks])
+
+        # 文档入库成功后，触发知识图谱构建（可选）
+        if self.graph_service:
+            for item in request.items:
+                try:
+                    self.graph_service.build_graph_from_document(
+                        doc_id=item.id, text=item.text
+                    )
+                except Exception:
+                    logger.warning("Graph building failed for document %s", item.id, exc_info=True)
+
         return UpsertDocumentsResponse(
             collection_name=self.settings.milvus_collection,
             upserted_count=len(all_chunks),
@@ -261,6 +281,14 @@ class VectorDocumentService:
 
         # 删除原始记录（兼容旧数据）+ 所有 chunk
         self._delete_chunks_for_doc(id)
+
+        # 同步清理知识图谱数据（可选）
+        if self.graph_service:
+            try:
+                self.graph_service.delete_graph_for_doc(id)
+            except Exception:
+                logger.warning("Graph cleanup failed for document %s", id, exc_info=True)
+
         return DeleteDocumentResponse(id=id, deleted=True)
 
     def _delete_chunks_for_doc(self, doc_id: str) -> None:

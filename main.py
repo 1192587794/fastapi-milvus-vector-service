@@ -49,14 +49,42 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.milvus_manager = milvus_manager
 
-    # 第二步：文档向量服务（embedding 模型在这里初始化）
-    vector_service = VectorDocumentService(settings, milvus_manager)
-    app.state.vector_service = vector_service
-
-    # 第三步：LLM 对话客户端（根据 LLM_PROVIDER 配置选择 Ollama 或 OpenAI）
+    # 第二步：LLM 对话客户端（根据 LLM_PROVIDER 配置选择 Ollama 或 OpenAI）
     llm_client = create_llm_client(settings)
 
-    # 第四步：BM25 召回器（可选，仅混合召回模式需要）
+    # 第三步：知识图谱服务（可选，需要在 vector_service 之前初始化）
+    # 启用时，文档入库自动构建图谱，RAG 检索增加图谱召回路
+    graph_service = None
+    graph_retriever = None
+    if settings.enable_knowledge_graph:
+        from db.graph_store import create_graph_store
+        from services.graph_service import GraphService
+        from utils.entity_extractor import EntityExtractor
+        from utils.relation_extractor import RelationExtractor
+        from utils.graph_retriever import GraphRetriever
+
+        graph_store = create_graph_store(settings)
+        entity_extractor = EntityExtractor(llm_client, settings)
+        relation_extractor = RelationExtractor(llm_client, settings)
+        # embedding 模型在 vector_service 中创建，这里先传 None
+        graph_service = GraphService(
+            settings, graph_store, entity_extractor,
+            relation_extractor, milvus_manager, None,
+        )
+        graph_retriever = GraphRetriever(graph_service, milvus_manager, settings)
+        app.state.graph_service = graph_service
+        logging.getLogger(__name__).info("知识图谱服务已启用 (backend=%s)", settings.graph_store_backend)
+
+    # 第四步：文档向量服务（embedding 模型在这里初始化）
+    # 传入 graph_service，文档入库时自动触发图谱构建
+    vector_service = VectorDocumentService(settings, milvus_manager, graph_service)
+    app.state.vector_service = vector_service
+
+    # 如果图谱服务已创建，更新其 embedding 模型引用
+    if graph_service:
+        graph_service._embedding = vector_service.embedding
+
+    # 第五步：BM25 召回器（可选，仅混合召回模式需要）
     # 传入 milvus_client 和 collection_name，用于从 Milvus 拉取文档构建 BM25 索引
     bm25_retriever = (
         BM25Retriever(milvus_manager.client, settings.milvus_collection)
@@ -64,7 +92,7 @@ async def lifespan(app: FastAPI):
         else None
     )
 
-    # 第五步：Cross-Encoder 精排器（可选）
+    # 第六步：Cross-Encoder 精排器（可选）
     # 懒加载设计：模型在首次 rerank() 调用时才下载和加载，不阻塞启动
     reranker = (
         CrossEncoderReranker(settings.reranker_model)
@@ -72,7 +100,7 @@ async def lifespan(app: FastAPI):
         else None
     )
 
-    # 第六步：Redis 会话服务（可选）
+    # 第七步：Redis 会话服务（可选）
     # 用于存储多轮对话历史，客户端只需传 session_id 即可续接对话
     session_service = None
     try:
@@ -86,10 +114,10 @@ async def lifespan(app: FastAPI):
             e,
         )
 
-    # 第七步：RAG 服务，编排召回 + 粗排 + 精排 + 生成
+    # 第八步：RAG 服务，编排召回 + 粗排 + 精排 + 生成
     app.state.rag_service = RAGService(
         settings, milvus_manager, vector_service.embedding, llm_client,
-        bm25_retriever, reranker, session_service,
+        bm25_retriever, reranker, session_service, graph_retriever,
     )
 
     yield
@@ -107,6 +135,9 @@ app = FastAPI(
 app.include_router(document_router)
 # 注册 RAG 问答路由（/api/v1/qa/*）
 app.include_router(qa_router)
+# 注册知识图谱路由（/api/v1/graph/*）
+from api.graph_routes import router as graph_router
+app.include_router(graph_router)
 
 
 @app.get("/health")

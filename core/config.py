@@ -100,6 +100,41 @@ class Settings(BaseSettings):
     #   过长的历史会占用 LLM 的上下文窗口，影响参考资料的可用空间
     rag_max_history_turns: int = Field(default=10, alias="RAG_MAX_HISTORY_TURNS")
 
+    # --- 知识图谱配置 ---
+    # enable_knowledge_graph: 是否开启知识图谱功能
+    #   false（默认）-> 不启用知识图谱，不影响现有 RAG 功能
+    #   true -> 文档入库时自动构建图谱，RAG 检索时增加图谱召回路
+    enable_knowledge_graph: bool = Field(default=False, alias="ENABLE_KNOWLEDGE_GRAPH")
+    # graph_store_backend: 图存储后端
+    #   "networkx"（默认）-> 基于 NetworkX 的内存图存储，零外部依赖
+    #   "neo4j" -> 基于 Neo4j 的生产级图数据库
+    graph_store_backend: str = Field(default="networkx", alias="GRAPH_STORE_BACKEND")
+    # graph_persist_path: NetworkX 图谱持久化路径（JSON 格式）
+    #   服务重启后可恢复数据，设为空则不持久化
+    graph_persist_path: str = Field(default="./data/graph.json", alias="GRAPH_PERSIST_PATH")
+    # graph_max_hops: 图谱查询最大跳数（1-4）
+    graph_max_hops: int = Field(default=2, alias="GRAPH_MAX_HOPS")
+    # graph_entity_confidence_threshold: 实体置信度阈值（0-1）
+    graph_entity_confidence_threshold: float = Field(default=0.7, alias="GRAPH_ENTITY_CONFIDENCE_THRESHOLD")
+    # graph_recall_weight: 图谱召回在 3-way RRF 融合中的权重（0-1）
+    graph_recall_weight: float = Field(default=0.2, alias="GRAPH_RECALL_WEIGHT")
+
+    # --- Neo4j 配置（仅 graph_store_backend=neo4j 时需要）---
+    neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
+    neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
+    neo4j_password: str = Field(default="", alias="NEO4J_PASSWORD")
+    neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
+
+    # --- 图谱抽取配置 ---
+    # graph_extraction_provider: 抽取使用的 LLM 提供商
+    #   "same"（默认）-> 复用 LLM_PROVIDER 配置
+    #   "ollama" / "openai" -> 使用指定的提供商
+    graph_extraction_provider: str = Field(default="same", alias="GRAPH_EXTRACTION_PROVIDER")
+    # graph_extraction_model: 抽取使用的模型名称，为空则使用默认模型
+    graph_extraction_model: str | None = Field(default=None, alias="GRAPH_EXTRACTION_MODEL")
+    # graph_extraction_batch_size: 每次 LLM 调用处理的文本分片数
+    graph_extraction_batch_size: int = Field(default=3, alias="GRAPH_EXTRACTION_BATCH_SIZE")
+
     # --- Redis 会话存储配置 ---
     # redis_url: Redis 连接地址，用于存储多轮对话历史
     #   默认连接本地 Redis 的 0 号数据库
