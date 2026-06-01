@@ -82,6 +82,43 @@ class Settings(BaseSettings):
     #   越小 -> 越偏向 BM25 召回（关键词匹配）
     hybrid_recall_alpha: float = Field(default=0.5, alias="HYBRID_RECALL_ALPHA")
 
+    # --- 查询改写配置 ---
+    # enable_query_rewriting: 是否开启查询改写
+    #   false（默认）-> 不改写，直接用原始问题检索
+    #   true -> 在召回前用 LLM 将口语化问题改写为更适合检索的形式
+    #   示例："这玩意儿咋用" -> "如何使用 Milvus 向量数据库"
+    enable_query_rewriting: bool = Field(default=False, alias="ENABLE_QUERY_REWRITING")
+    # query_rewriting_prompt: 查询改写的提示词模板
+    #   {question} 会被替换为用户的原始问题
+    #   {context} 会被替换为对话历史（如果有）
+    #   {kb_topic} 会被替换为知识库主题描述（如果有）
+    query_rewriting_prompt: str = Field(
+        default=(
+            "你是一个查询改写助手。请根据上下文将用户问题改写为更适合搜索引擎检索的形式。\n\n"
+            "改写要求：\n"
+            "1. 保留原始问题的核心语义和意图\n"
+            "2. 将口语化表达转换为正式表达\n"
+            "3. 根据上下文补充缺失的信息（如将代词替换为具体名词）\n"
+            "4. 如果上下文中有相关讨论的主题，将其融入改写后的问题\n"
+            "5. 只输出改写后的问题，不要添加任何解释\n\n"
+            "{context}"
+            "{kb_topic}"
+            "原始问题：{question}\n\n"
+            "改写后的问题："
+        ),
+        alias="QUERY_REWRITING_PROMPT",
+    )
+    # query_rewriting_context_turns: 查询改写时使用的对话历史轮数
+    #   3（默认）-> 使用最近 3 轮对话作为上下文
+    #   设为 0 则不使用对话历史
+    query_rewriting_context_turns: int = Field(default=3, alias="QUERY_REWRITING_CONTEXT_TURNS")
+    # query_rewriting_kb_topic: 知识库主题描述，帮助 LLM 理解领域上下文
+    #   示例："这是一个关于 Milvus 向量数据库的技术文档知识库"
+    query_rewriting_kb_topic: str = Field(
+        default="",
+        alias="QUERY_REWRITING_KB_TOPIC",
+    )
+
     # --- 精排配置 ---
     # enable_reranker: 是否开启 Cross-Encoder 精排
     #   false（默认）-> 不精排，直接用粗排结果
