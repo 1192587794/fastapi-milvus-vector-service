@@ -60,6 +60,7 @@ class RAGService:
         reranker: CrossEncoderReranker | None = None,  # 精排器，None 表示不启用精排
         session_service: SessionService | None = None,  # 会话服务，None 表示不启用服务端历史存储
         graph_retriever: Any | None = None,  # 图谱召回器，None 表示不启用图谱召回
+        query_rewriter: Any | None = None,  # Query 改写器，None 表示不启用改写
     ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
@@ -69,6 +70,7 @@ class RAGService:
         self.reranker = reranker
         self.session_service = session_service
         self.graph_retriever = graph_retriever
+        self.query_rewriter = query_rewriter
 
     def ask(self, request: AskRequest) -> AskResponse:
         """
@@ -76,21 +78,31 @@ class RAGService:
 
         流程：
         1. 加载对话历史（从 Redis 或客户端传入）
-        2. 召回 + 粗排 -> sources（相关文档列表）
-        3. 计算置信度 -> confidence
-        4. 构造 prompt + 调用 LLM -> answer
-        5. 保存对话历史到 Redis（如果启用了会话服务）
-        6. 组装响应返回
+        2. Query 改写（可选）
+        3. 召回 + 粗排 -> sources（相关文档列表）
+        4. 计算置信度 -> confidence
+        5. 构造 prompt + 调用 LLM -> answer
+        6. 保存对话历史到 Redis（如果启用了会话服务）
+        7. 组装响应返回
         """
         # --- 阶段 0：会话管理 ---
         session_id, history = self._resolve_session(request)
 
+        # --- 阶段 0.5：Query 改写（可选）---
+        rewritten = None
+        if self.query_rewriter and self.settings.enable_query_rewrite:
+            rewritten = self.query_rewriter.rewrite(
+                question=request.question,
+                history=history,
+                strategy=self.settings.query_rewrite_strategy,
+            )
+
         # --- 阶段 1：召回 + 粗排 ---
-        sources, hybrid_used, rewritten_query = self._recall(
+        sources, hybrid_used = self._recall(
             question=request.question,
             top_k=request.top_k,
             source_filter=request.source,
-            history=history,
+            rewritten=rewritten,
         )
 
         # --- 阶段 2：置信度评估 ---
@@ -110,14 +122,13 @@ class RAGService:
         # --- 阶段 5：组装响应 ---
         return AskResponse(
             question=request.question,
-            rewritten_query=rewritten_query if self.settings.enable_query_rewriting else None,
             answer=answer,
             sources=sources,
             llm_provider=self.settings.llm_provider,
             confidence=confidence,
             hybrid_recall_used=hybrid_used,
             graph_recall_used=self.graph_retriever is not None,
-            query_rewriting_used=self.settings.enable_query_rewriting,
+            query_rewrite_used=rewritten is not None,
             session_id=session_id,
         )
 
@@ -131,12 +142,21 @@ class RAGService:
         # --- 阶段 0：会话管理 ---
         session_id, history = self._resolve_session(request)
 
+        # --- 阶段 0.5：Query 改写（可选）---
+        rewritten = None
+        if self.query_rewriter and self.settings.enable_query_rewrite:
+            rewritten = self.query_rewriter.rewrite(
+                question=request.question,
+                history=history,
+                strategy=self.settings.query_rewrite_strategy,
+            )
+
         # --- 阶段 1：召回 + 粗排 ---
-        sources, hybrid_used, rewritten_query = self._recall(
+        sources, hybrid_used = self._recall(
             question=request.question,
             top_k=request.top_k,
             source_filter=request.source,
-            history=history,
+            rewritten=rewritten,
         )
 
         # --- 阶段 2：流式生成 ---
@@ -204,83 +224,13 @@ class RAGService:
         except Exception:
             logger.warning("保存对话历史失败 session_id=%s", session_id, exc_info=True)
 
-    def _rewrite_query(self, question: str, history: list[dict] | None = None) -> str:
-        """
-        查询改写：用 LLM 将用户的口语化问题改写为更适合检索的形式。
-
-        通过对话历史和知识库主题提供上下文，解决代词指代和语境缺失问题。
-
-        典型场景（有上下文时）：
-        - 用户先问"Milvus 是什么"，再问"这玩意儿咋用"
-          -> 改写为"如何使用 Milvus 向量数据库"
-        - 用户先问"向量数据库的原理"，再问"那个东西出了问题"
-          -> 改写为"向量数据库连接异常排查"
-
-        参数:
-            question: 用户的原始问题
-            history: 对话历史列表，格式为 [{"role": "user/assistant", "content": "..."}]
-
-        返回:
-            改写后的问题（如果改写失败则返回原始问题）
-        """
-        if not self.settings.enable_query_rewriting:
-            return question
-
-        try:
-            # 构建对话历史上下文
-            context_parts = []
-            if history:
-                # 只取最近 N 轮对话
-                max_turns = self.settings.query_rewriting_context_turns
-                recent_history = history[-(max_turns * 2):] if max_turns > 0 else []
-
-                if recent_history:
-                    context_parts.append("最近的对话历史：\n")
-                    for msg in recent_history:
-                        role = "用户" if msg["role"] == "user" else "助手"
-                        # 截断过长的内容，避免 token 浪费
-                        content = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
-                        context_parts.append(f"{role}：{content}\n")
-                    context_parts.append("\n")
-
-            # 添加知识库主题上下文
-            kb_topic = ""
-            if self.settings.query_rewriting_kb_topic:
-                kb_topic = f"知识库主题：{self.settings.query_rewriting_kb_topic}\n\n"
-
-            context = "".join(context_parts) if context_parts else ""
-
-            # 格式化 prompt
-            prompt = self.settings.query_rewriting_prompt.format(
-                question=question,
-                context=context,
-                kb_topic=kb_topic,
-            )
-            messages = [{"role": "user", "content": prompt}]
-            rewritten = self.llm_client.chat(
-                messages=messages,
-                temperature=0.3,  # 低温度，保证改写稳定性
-                max_tokens=200,
-            )
-            # 清理可能的引号和空白
-            rewritten = rewritten.strip().strip('"').strip("'").strip()
-            if rewritten:
-                logger.info("查询改写：'%s' -> '%s'", question, rewritten)
-                return rewritten
-            else:
-                logger.warning("查询改写返回空结果，使用原始问题")
-                return question
-        except Exception:
-            logger.warning("查询改写失败，使用原始问题", exc_info=True)
-            return question
-
     def _recall(
         self,
         question: str,
         top_k: int,
         source_filter: str | None = None,
-        history: list[dict] | None = None,
-    ) -> tuple[list[SourceChunk], bool, str]:
+        rewritten=None,
+    ) -> tuple[list[SourceChunk], bool]:
         """
         召回阶段总入口。
 
@@ -288,20 +238,17 @@ class RAGService:
         - 纯向量召回（默认）：只用 embedding 做语义搜索
         - 混合召回 + RRF 粗排：同时执行向量召回和 BM25 召回，用 RRF 融合
         - 图谱召回（可选）：从知识图谱中检索相关实体和关系
-        - 查询改写（可选）：在召回前用 LLM 改写问题
+        - Query 改写召回（可选）：使用改写后的问题进行多路召回
 
         参数:
             question: 用户问题
             top_k: 最终返回的文档数量
             source_filter: 可选的来源过滤
-            history: 对话历史，用于查询改写的上下文
+            rewritten: 改写后的查询（可选）
 
         返回:
-            (召回结果列表, 是否使用了混合召回, 实际用于检索的问题)
+            (召回结果列表, 是否使用了混合召回)
         """
-        # --- 阶段 0：查询改写（可选）---
-        rewritten_query = self._rewrite_query(question, history)
-
         # 按倍数多取候选，供后续排序截取
         # 例如 top_k=5, multiplier=4，则召回 20 条候选
         recall_limit = top_k * self.settings.rag_recall_multiplier
@@ -313,7 +260,35 @@ class RAGService:
             filter_expr = f'source == "{escaped}"'
 
         # --- 向量召回（Dense Recall）：语义匹配 ---
-        dense_results = self._dense_recall(rewritten_query, recall_limit, filter_expr)
+        # 如果有 HyDE 改写，用假设性答案的 embedding 去检索
+        if rewritten and rewritten.hyde_answer:
+            dense_results = self._dense_recall(
+                rewritten.hyde_answer, recall_limit, filter_expr
+            )
+        else:
+            dense_results = self._dense_recall(question, recall_limit, filter_expr)
+
+        # --- Query 扩展召回（可选）---
+        if rewritten and rewritten.expanded:
+            for sub_query in rewritten.expanded:
+                sub_results = self._dense_recall(sub_query, recall_limit, filter_expr)
+                # 合并结果，去重
+                existing_ids = {doc.id for doc in dense_results}
+                for doc in sub_results:
+                    if doc.id not in existing_ids:
+                        dense_results.append(doc)
+                        existing_ids.add(doc.id)
+
+        # --- Step-back 召回（可选）---
+        if rewritten and rewritten.stepback:
+            stepback_results = self._dense_recall(
+                rewritten.stepback, recall_limit, filter_expr
+            )
+            existing_ids = {doc.id for doc in dense_results}
+            for doc in stepback_results:
+                if doc.id not in existing_ids:
+                    dense_results.append(doc)
+                    existing_ids.add(doc.id)
 
         # --- BM25 稀疏召回（Sparse Recall，可选）---
         sparse_results = []
@@ -322,8 +297,13 @@ class RAGService:
             and self.bm25_retriever is not None
         )
         if use_hybrid:
+            # 使用关键词进行 BM25 检索（如果有关键词提取）
+            bm25_query = question
+            if rewritten and rewritten.keywords:
+                bm25_query = " ".join(rewritten.keywords)
+
             sparse_results = self.bm25_retriever.retrieve(
-                query=rewritten_query,
+                query=bm25_query,
                 top_k=recall_limit,
                 filter_expr=filter_expr,
             )
@@ -333,7 +313,7 @@ class RAGService:
         use_graph = self.graph_retriever is not None
         if use_graph:
             graph_results = self.graph_retriever.retrieve(
-                question=rewritten_query,
+                question=question,
                 top_k=recall_limit,
                 max_hops=self.settings.graph_max_hops,
             )
@@ -352,7 +332,7 @@ class RAGService:
         if self.reranker:
             sources = self.reranker.rerank(question, sources, top_k)
 
-        return sources, use_hybrid or use_graph, rewritten_query
+        return sources, use_hybrid or use_graph
 
     def _dense_recall(
         self,

@@ -172,6 +172,21 @@ class Settings(BaseSettings):
     # graph_extraction_batch_size: 每次 LLM 调用处理的文本分片数
     graph_extraction_batch_size: int = Field(default=3, alias="GRAPH_EXTRACTION_BATCH_SIZE")
 
+    # --- Query 改写配置 ---
+    # enable_query_rewrite: 是否开启 Query 改写功能
+    #   false（默认）-> 不改写，直接使用原始问题
+    #   true -> 在召回前对问题进行改写，提高召回率和精度
+    enable_query_rewrite: bool = Field(default=False, alias="ENABLE_QUERY_REWRITE")
+    # query_rewrite_strategy: 改写策略
+    #   "expansion" -> 查询扩展：生成多个子问题
+    #   "hyde" -> HyDE：生成假设性答案
+    #   "stepback" -> Step-back：生成更抽象的问题
+    #   "keywords" -> 关键词提取
+    #   "all"（默认）-> 全部策略都使用
+    query_rewrite_strategy: str = Field(default="all", alias="QUERY_REWRITE_STRATEGY")
+    # query_expansion_count: 查询扩展时生成的子问题数量
+    query_expansion_count: int = Field(default=3, alias="QUERY_EXPANSION_COUNT")
+
     # --- Redis 会话存储配置 ---
     # redis_url: Redis 连接地址，用于存储多轮对话历史
     #   默认连接本地 Redis 的 0 号数据库

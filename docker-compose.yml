@@ -1,0 +1,221 @@
+# ============================================================
+# FastAPI Milvus Vector Service Docker Compose
+# ============================================================
+# 一键部署 RAG 问答服务及所有依赖
+#
+# 使用方法：
+#   启动所有服务：docker compose up -d
+#   查看日志：    docker compose logs -f
+#   停止所有服务：docker compose down
+#   清理数据：    docker compose down -v
+# ============================================================
+
+services:
+  # ============================================================
+  # FastAPI 应用服务
+  # ============================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: milvus-fastapi-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # 覆盖为 Docker 内部网络地址
+      - MILVUS_URI=http://milvus:19530
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - REDIS_URL=redis://redis:6379/0
+      - GRAPH_PERSIST_PATH=/app/data/graph.json
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Milvus 依赖服务：etcd
+  # ============================================================
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Milvus 依赖服务：MinIO (对象存储)
+  # ============================================================
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus-minio
+    environment:
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Milvus 向量数据库
+  # ============================================================
+  milvus:
+    image: milvusdb/milvus:v2.4.0
+    container_name: milvus-standalone
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    command: ["milvus", "run", "standalone"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Redis 会话存储
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: milvus-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Ollama LLM 服务
+  # ============================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: milvus-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # Ollama 模型初始化（可选）
+  # ============================================================
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: milvus-ollama-init
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "等待 Ollama 服务启动..."
+        for i in $(seq 1 30); do
+          if curl -s http://ollama:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama 服务已就绪"
+            break
+          fi
+          echo "等待中... ($i/30)"
+          sleep 5
+        done
+        echo "拉取 Embedding 模型..."
+        ollama pull nomic-embed-text || echo "Embedding 模型拉取失败"
+        echo "拉取 Chat 模型..."
+        ollama pull qwen2.5:7b || echo "Chat 模型拉取失败"
+        echo "模型初始化完成"
+    networks:
+      - milvus-network
+
+  # ============================================================
+  # 前端界面
+  # ============================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: milvus-fastapi-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - milvus-network
+
+# ============================================================
+# 数据卷
+# ============================================================
+volumes:
+  app_data:
+    driver: local
+  etcd_data:
+    driver: local
+  minio_data:
+    driver: local
+  milvus_data:
+    driver: local
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+# ============================================================
+# 网络
+# ============================================================
+networks:
+  milvus-network:
+    driver: bridge

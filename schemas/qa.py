@@ -57,17 +57,13 @@ class AskResponse(BaseModel):
     """
 
     question: str  # 原始问题
-    rewritten_query: str | None = Field(
-        default=None,
-        description="查询改写后的问题。仅在开启查询改写时返回，用于调试和对比。",
-    )
     answer: str  # LLM 生成的回答（可能包含 [1][2] 引用标记）
     sources: list[SourceChunk]  # 召回的参考文档列表
     llm_provider: str  # 使用的 LLM 提供商（ollama 或 openai）
     confidence: float = Field(default=0.0, description="回答置信度，0-1 之间，越高越可信。")
     hybrid_recall_used: bool = Field(default=False, description="是否使用了混合召回（向量 + BM25）。")
     graph_recall_used: bool = Field(default=False, description="是否使用了知识图谱召回。")
-    query_rewriting_used: bool = Field(default=False, description="是否使用了查询改写。")
+    query_rewrite_used: bool = Field(default=False, description="是否使用了 Query 改写。")
     session_id: str | None = Field(
         default=None,
         description="会话 ID。首次提问时由服务端生成，后续追问时原样传入即可。",
