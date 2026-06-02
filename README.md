@@ -20,6 +20,7 @@
 - **多轮对话** — 基于 Redis 的会话管理，支持上下文连续对话
 
 ### 检索增强
+- **Query 改写** — 查询扩展、HyDE、Step-back、关键词提取四种策略
 - **混合召回** — 向量召回 + BM25 关键词召回，双路互补
 - **RRF 粗排** — Reciprocal Rank Fusion 融合两路召回结果
 - **Cross-Encoder 精排** — 使用预训练模型逐对打分，提升精度
@@ -90,7 +91,8 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 │   ├── file_parser.py       # PDF/DOCX 文件解析
 │   ├── entity_extractor.py  # LLM 实体抽取
 │   ├── relation_extractor.py# LLM 关系抽取
-│   └── graph_retriever.py   # 图谱召回器
+│   ├── graph_retriever.py   # 图谱召回器
+│   └── query_rewriter.py    # Query 改写器
 ├── docs/
 │   └── knowledge_graph_tutorial.md  # 知识图谱学习文档
 └── tests/
@@ -274,6 +276,11 @@ HYBRID_RECALL_ALPHA=0.5
 ENABLE_RERANKER=false
 RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 
+# Query 改写（可选）
+ENABLE_QUERY_REWRITE=false
+QUERY_REWRITE_STRATEGY=all  # expansion/hyde/stepback/keywords/all
+QUERY_EXPANSION_COUNT=3
+
 # 知识图谱（可选）
 ENABLE_KNOWLEDGE_GRAPH=false
 GRAPH_STORE_BACKEND=networkx  # 或 neo4j
@@ -298,28 +305,37 @@ SESSION_TTL_SECONDS=3600
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  1. 召回（Recall）                        │
-│  ├─ 稠密向量召回：语义匹配                  │
-│  ├─ 稀疏 BM25 召回：关键词匹配（可选）       │
-│  └─ 图谱召回：知识图谱多跳遍历（可选）        │
+│  0. Query 改写（可选）                   │
+│  ├─ 查询扩展：生成多个子问题              │
+│  ├─ HyDE：生成假设性答案                 │
+│  ├─ Step-back：生成更抽象的问题          │
+│  └─ 关键词提取：提取检索关键词            │
 └─────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  2. 粗排（Coarse Ranking）                │
-│  └─ 3-way RRF 融合三路召回结果              │
+│  1. 召回（Recall）                       │
+│  ├─ 稠密向量召回：语义匹配                │
+│  ├─ 稀疏 BM25 召回：关键词匹配（可选）     │
+│  └─ 图谱召回：知识图谱多跳遍历（可选）     │
 └─────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  3. 精排（Fine Ranking）—— 可选            │
-│  └─ Cross-Encoder 逐对打分                 │
+│  2. 粗排（Coarse Ranking）               │
+│  └─ 3-way RRF 融合三路召回结果            │
 └─────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  4. 生成（Generation）                    │
-│  └─ 将召回文档作为上下文，调用 LLM 生成回答   │
+│  3. 精排（Fine Ranking）—— 可选          │
+│  └─ Cross-Encoder 逐对打分               │
+└─────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────┐
+│  4. 生成（Generation）                   │
+│  └─ 将召回文档作为上下文，调用 LLM 生成回答│
 └─────────────────────────────────────────┘
     │
     ▼
