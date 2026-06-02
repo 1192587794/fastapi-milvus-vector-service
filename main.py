@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import redis
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.qa_routes import router as qa_router
 from api.routes import router as document_router
@@ -137,6 +138,15 @@ app = FastAPI(
     version="0.1.0",
     description="A standardized FastAPI service template for Milvus vector database usage.",
     lifespan=lifespan,
+)
+
+# CORS 跨域配置（前端开发服务器需要）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 注册文档管理路由（/api/v1/documents/*）

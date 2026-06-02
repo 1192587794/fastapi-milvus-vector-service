@@ -116,4 +116,22 @@ class MilvusManager:
 
     def describe_collection(self) -> dict:
         """返回集合信息,便于健康检查和调试."""
-        return self._client.describe_collection(self.settings.milvus_collection)
+        try:
+            info = self._client.describe_collection(self.settings.milvus_collection)
+            # 将 protobuf 对象转换为可序列化的 dict
+            return self._serialize(info)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _serialize(self, obj):
+        """递归将对象转换为可 JSON 序列化的格式."""
+        if isinstance(obj, dict):
+            return {k: self._serialize(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._serialize(item) for item in obj]
+        elif hasattr(obj, '__dict__'):
+            return {k: self._serialize(v) for k, v in obj.__dict__.items()}
+        elif isinstance(obj, (int, float, str, bool, type(None))):
+            return obj
+        else:
+            return str(obj)

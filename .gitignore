@@ -51,3 +51,15 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+frontend/.vite/
+
+# Docker
+*.log
+
+# uv
+uv.lock
