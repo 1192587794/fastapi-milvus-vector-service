@@ -63,6 +63,7 @@ class AskResponse(BaseModel):
     confidence: float = Field(default=0.0, description="回答置信度，0-1 之间，越高越可信。")
     hybrid_recall_used: bool = Field(default=False, description="是否使用了混合召回（向量 + BM25）。")
     graph_recall_used: bool = Field(default=False, description="是否使用了知识图谱召回。")
+    query_rewrite_used: bool = Field(default=False, description="是否使用了 Query 改写。")
     session_id: str | None = Field(
         default=None,
         description="会话 ID。首次提问时由服务端生成，后续追问时原样传入即可。",

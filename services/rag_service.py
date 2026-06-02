@@ -60,6 +60,7 @@ class RAGService:
         reranker: CrossEncoderReranker | None = None,  # 精排器，None 表示不启用精排
         session_service: SessionService | None = None,  # 会话服务，None 表示不启用服务端历史存储
         graph_retriever: Any | None = None,  # 图谱召回器，None 表示不启用图谱召回
+        query_rewriter: Any | None = None,  # Query 改写器，None 表示不启用改写
     ) -> None:
         self.settings = settings
         self.milvus_manager = milvus_manager
@@ -69,6 +70,7 @@ class RAGService:
         self.reranker = reranker
         self.session_service = session_service
         self.graph_retriever = graph_retriever
+        self.query_rewriter = query_rewriter
 
     def ask(self, request: AskRequest) -> AskResponse:
         """
@@ -76,20 +78,31 @@ class RAGService:
 
         流程：
         1. 加载对话历史（从 Redis 或客户端传入）
-        2. 召回 + 粗排 -> sources（相关文档列表）
-        3. 计算置信度 -> confidence
-        4. 构造 prompt + 调用 LLM -> answer
-        5. 保存对话历史到 Redis（如果启用了会话服务）
-        6. 组装响应返回
+        2. Query 改写（可选）
+        3. 召回 + 粗排 -> sources（相关文档列表）
+        4. 计算置信度 -> confidence
+        5. 构造 prompt + 调用 LLM -> answer
+        6. 保存对话历史到 Redis（如果启用了会话服务）
+        7. 组装响应返回
         """
         # --- 阶段 0：会话管理 ---
         session_id, history = self._resolve_session(request)
+
+        # --- 阶段 0.5：Query 改写（可选）---
+        rewritten = None
+        if self.query_rewriter and self.settings.enable_query_rewrite:
+            rewritten = self.query_rewriter.rewrite(
+                question=request.question,
+                history=history,
+                strategy=self.settings.query_rewrite_strategy,
+            )
 
         # --- 阶段 1：召回 + 粗排 ---
         sources, hybrid_used = self._recall(
             question=request.question,
             top_k=request.top_k,
             source_filter=request.source,
+            rewritten=rewritten,
         )
 
         # --- 阶段 2：置信度评估 ---
@@ -115,6 +128,7 @@ class RAGService:
             confidence=confidence,
             hybrid_recall_used=hybrid_used,
             graph_recall_used=self.graph_retriever is not None,
+            query_rewrite_used=rewritten is not None,
             session_id=session_id,
         )
 
@@ -128,11 +142,21 @@ class RAGService:
         # --- 阶段 0：会话管理 ---
         session_id, history = self._resolve_session(request)
 
+        # --- 阶段 0.5：Query 改写（可选）---
+        rewritten = None
+        if self.query_rewriter and self.settings.enable_query_rewrite:
+            rewritten = self.query_rewriter.rewrite(
+                question=request.question,
+                history=history,
+                strategy=self.settings.query_rewrite_strategy,
+            )
+
         # --- 阶段 1：召回 + 粗排 ---
         sources, hybrid_used = self._recall(
             question=request.question,
             top_k=request.top_k,
             source_filter=request.source,
+            rewritten=rewritten,
         )
 
         # --- 阶段 2：流式生成 ---
@@ -205,6 +229,7 @@ class RAGService:
         question: str,
         top_k: int,
         source_filter: str | None = None,
+        rewritten=None,
     ) -> tuple[list[SourceChunk], bool]:
         """
         召回阶段总入口。
@@ -213,11 +238,13 @@ class RAGService:
         - 纯向量召回（默认）：只用 embedding 做语义搜索
         - 混合召回 + RRF 粗排：同时执行向量召回和 BM25 召回，用 RRF 融合
         - 图谱召回（可选）：从知识图谱中检索相关实体和关系
+        - Query 改写召回（可选）：使用改写后的问题进行多路召回
 
         参数:
             question: 用户问题
             top_k: 最终返回的文档数量
             source_filter: 可选的来源过滤
+            rewritten: 改写后的查询（可选）
 
         返回:
             (召回结果列表, 是否使用了混合召回)
@@ -233,7 +260,35 @@ class RAGService:
             filter_expr = f'source == "{escaped}"'
 
         # --- 向量召回（Dense Recall）：语义匹配 ---
-        dense_results = self._dense_recall(question, recall_limit, filter_expr)
+        # 如果有 HyDE 改写，用假设性答案的 embedding 去检索
+        if rewritten and rewritten.hyde_answer:
+            dense_results = self._dense_recall(
+                rewritten.hyde_answer, recall_limit, filter_expr
+            )
+        else:
+            dense_results = self._dense_recall(question, recall_limit, filter_expr)
+
+        # --- Query 扩展召回（可选）---
+        if rewritten and rewritten.expanded:
+            for sub_query in rewritten.expanded:
+                sub_results = self._dense_recall(sub_query, recall_limit, filter_expr)
+                # 合并结果，去重
+                existing_ids = {doc.id for doc in dense_results}
+                for doc in sub_results:
+                    if doc.id not in existing_ids:
+                        dense_results.append(doc)
+                        existing_ids.add(doc.id)
+
+        # --- Step-back 召回（可选）---
+        if rewritten and rewritten.stepback:
+            stepback_results = self._dense_recall(
+                rewritten.stepback, recall_limit, filter_expr
+            )
+            existing_ids = {doc.id for doc in dense_results}
+            for doc in stepback_results:
+                if doc.id not in existing_ids:
+                    dense_results.append(doc)
+                    existing_ids.add(doc.id)
 
         # --- BM25 稀疏召回（Sparse Recall，可选）---
         sparse_results = []
@@ -242,8 +297,13 @@ class RAGService:
             and self.bm25_retriever is not None
         )
         if use_hybrid:
+            # 使用关键词进行 BM25 检索（如果有关键词提取）
+            bm25_query = question
+            if rewritten and rewritten.keywords:
+                bm25_query = " ".join(rewritten.keywords)
+
             sparse_results = self.bm25_retriever.retrieve(
-                query=question,
+                query=bm25_query,
                 top_k=recall_limit,
                 filter_expr=filter_expr,
             )
