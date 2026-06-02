@@ -43,7 +43,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/fastapi-milvus-vector-service.git
+git clone https://github.com/1192587794/fastapi-milvus-vector-service.git
 cd fastapi-milvus-vector-service
 
 # 一键启动所有服务
